@@ -30,6 +30,9 @@ jobs:
       - name: Apply PerfHUD patch
         run: python3 apply_perfhud.py .
 
+      - name: Apply Gravity double-shake patch
+        run: python3 apply_gravity_shake.py .
+
       - name: Apply Simplified Chinese patch
         run: python3 apply_zh_hans.py .
 
