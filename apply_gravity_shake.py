@@ -558,8 +558,8 @@ def main() -> None:
     text = path.read_text(encoding="utf-8")
 
     # Idempotence: do not stack the patch if the workflow is re-run on an already patched tree.
-    if "settings_gravity_maybe_handoff_page_async" in text and "Double-shake detector armed" in text and "gravitylite_handoff_current_page_in_session" in (root / "Cyanide" / "tweaks" / "gravitylite.m").read_text(encoding="utf-8"):
-        print("[GRAVITY-SHAKE] v3 already applied")
+    if "settings_gravity_submit_tilt_async" in text and "Double-shake detector armed" in text and "gravitylite_handoff_current_page_in_session" in (root / "Cyanide" / "tweaks" / "gravitylite.m").read_text(encoding="utf-8"):
+        print("[GRAVITY-SHAKE] v3.2 already applied")
         return
 
     # Older v1/v2 Settings-only patch must not be stacked onto itself.
@@ -591,7 +591,13 @@ static volatile int g_gravity_shake_waiting_for_release = 0;
 // group, keeps the Dock group alive, then captures the newly visible page.
 static volatile uint64_t g_gravity_page_probe_after_us = 0;
 static volatile uint64_t g_gravity_page_token = 0;
-static volatile int g_gravity_page_handoff_running = 0;'''
+static volatile int g_gravity_page_handoff_running = 0;
+// Never block the CoreMotion callback on a SpringBoard RemoteCall. While
+// physics is active we submit at most one tilt update worker at a time and
+// throttle it to ~12.5 Hz, leaving the 25 Hz sensor feed free to detect the
+// second double-shake reliably.
+static volatile int g_gravity_tilt_update_running = 0;
+static volatile uint64_t g_gravity_tilt_next_submit_us = 0;'''
     text = replace_once(text, old_globals, new_globals, "gravity global state")
 
     old_decl = '''static void settings_mark_tweak_applied(NSString *key, BOOL applied);
@@ -672,9 +678,56 @@ static bool settings_gravity_restore_quick(void)
     return ok;
 }
 
+
+static void settings_gravity_submit_tilt_async(double angle,
+                                               double magnitude,
+                                               uint64_t generation,
+                                               CMMotionManager *manager)
+{
+    if (g_gravitylite_physics_active == 0 ||
+        g_gravity_shake_toggle_running != 0 ||
+        g_gravity_motion_stop_requested != 0 ||
+        !g_springboard_rc_ready ||
+        settings_cleanup_in_progress()) {
+        return;
+    }
+
+    uint64_t now = settings_gravity_sensor_now_us();
+    if (now == 0 || now < g_gravity_tilt_next_submit_us) return;
+    __sync_lock_test_and_set(&g_gravity_tilt_next_submit_us, now + 80000ULL);
+
+    // If the previous RemoteCall is still in flight, drop this tilt sample.
+    // Fresh sensor samples are more valuable than building a stale backlog.
+    if (__sync_lock_test_and_set(&g_gravity_tilt_update_running, 1)) return;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @try {
+            if (!settings_gravity_motion_can_remote_call(generation, manager) ||
+                g_gravitylite_physics_active == 0 ||
+                g_gravity_shake_toggle_running != 0) {
+                return;
+            }
+
+            @synchronized (settings_rc_lock()) {
+                if (!settings_gravity_motion_can_remote_call(generation, manager) ||
+                    g_gravitylite_physics_active == 0 ||
+                    g_gravity_shake_toggle_running != 0) {
+                    return;
+                }
+                uint32_t oldSettle = r_settle_us(0);
+                gravitylite_update_gravity_angle_in_session(angle, magnitude);
+                r_settle_us(oldSettle);
+            }
+        } @finally {
+            __sync_lock_release(&g_gravity_tilt_update_running);
+        }
+    });
+}
+
 static void settings_gravity_maybe_handoff_page_async(void)
 {
     if (g_gravitylite_physics_active == 0 ||
+        g_gravity_shake_toggle_running != 0 ||
         g_gravity_motion_stop_requested != 0 ||
         !g_springboard_rc_ready ||
         settings_cleanup_in_progress()) {
@@ -691,6 +744,7 @@ static void settings_gravity_maybe_handoff_page_async(void)
             NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
             @synchronized (settings_rc_lock()) {
                 if (g_gravitylite_physics_active == 0 ||
+                    g_gravity_shake_toggle_running != 0 ||
                     g_gravity_motion_stop_requested != 0 ||
                     !g_springboard_rc_ready ||
                     settings_cleanup_in_progress() ||
@@ -749,6 +803,12 @@ static void settings_gravity_toggle_physics_from_shake_async(void)
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         BOOL turningOn = (g_gravitylite_physics_active == 0);
         bool ok = false;
+        // OFF must preempt the continuous tilt stream. Otherwise the restore
+        // worker can sit behind RemoteCall traffic while the user keeps
+        // shaking a phone that has already heard the gesture.
+        if (!turningOn) {
+            __sync_lock_test_and_set(&g_gravitylite_physics_active, 0);
+        }
         @try {
             @synchronized (settings_rc_lock()) {
                 if (settings_cleanup_in_progress() ||
@@ -780,6 +840,10 @@ static void settings_gravity_toggle_physics_from_shake_async(void)
                         // "Applied" now means the shake feature is armed. Keep
                         // the package installed even while icons are restored.
                         settings_mark_tweak_applied(kSettingsGravityLiteEnabled, YES);
+                    } else {
+                        // Restore failed. Resume physics/tilt state rather than
+                        // leaving the local toggle bit falsely OFF.
+                        __sync_lock_test_and_set(&g_gravitylite_physics_active, 1);
                     }
                 }
             }
@@ -814,7 +878,9 @@ static void settings_gravity_process_shake_sample(double x,
     const double trigger = gravityRemoved ? 1.35 : 2.25;
     const double release = gravityRemoved ? 0.90 : 1.55;
     const uint64_t minPulseGapUS = 260000ULL;
-    const uint64_t doubleShakeWindowUS = 1800000ULL;
+    const uint64_t forcedReleaseUS = 420000ULL;
+    const uint64_t doubleShakeWindowUS = (g_gravitylite_physics_active != 0)
+                                       ? 2400000ULL : 1800000ULL;
     const uint64_t postToggleCooldownUS = 1200000ULL;
 
     uint64_t now = settings_gravity_sensor_now_us();
@@ -825,9 +891,18 @@ static void settings_gravity_process_shake_sample(double x,
         __sync_lock_test_and_set(&g_gravity_shake_waiting_for_release, 0);
         return;
     }
-    if (a < trigger || g_gravity_shake_waiting_for_release != 0) return;
 
     uint64_t last = g_gravity_shake_last_pulse_us;
+    if (g_gravity_shake_waiting_for_release != 0) {
+        // A very hard shake can keep userAcceleration above the old release
+        // threshold between two swings. Re-arm after a conservative gap so
+        // "shake harder" does not paradoxically make the second shake vanish.
+        if (last == 0 || now <= last || (now - last) < forcedReleaseUS) return;
+        __sync_lock_test_and_set(&g_gravity_shake_waiting_for_release, 0);
+    }
+    if (a < trigger) return;
+
+
     if (last != 0 && now > last && (now - last) < minPulseGapUS) return;
 
     __sync_lock_test_and_set(&g_gravity_shake_waiting_for_release, 1);
@@ -856,6 +931,7 @@ static void settings_start_gravity_motion(double magnitude, double explosionForc
         g_gravity_motion_manager = nil;
     }
     settings_gravity_reset_shake_detector();
+    __sync_lock_test_and_set(&g_gravity_tilt_next_submit_us, 0);
 
     CMMotionManager *mm = [[CMMotionManager alloc] init];
     g_gravity_motion_manager = mm;
@@ -883,11 +959,10 @@ static void settings_start_gravity_motion(double magnitude, double explosionForc
             double effectiveMagnitude = magnitude * ((tilt < 0.14)
                                                      ? 0.65
                                                      : (0.90 + fmin(tilt, 1.0) * 0.60));
-            @synchronized (settings_rc_lock()) {
-                if (!settings_gravity_motion_can_remote_call(generation, mm) ||
-                    g_gravitylite_physics_active == 0) return;
-                gravitylite_update_gravity_angle_in_session(angle, effectiveMagnitude);
-            }
+            settings_gravity_submit_tilt_async(angle,
+                                               effectiveMagnitude,
+                                               generation,
+                                               mm);
         }];
     } else {
         mm.accelerometerUpdateInterval = 0.04;
@@ -907,11 +982,10 @@ static void settings_start_gravity_motion(double magnitude, double explosionForc
             double effectiveMagnitude = magnitude * ((tilt < 0.14)
                                                      ? 0.65
                                                      : (0.90 + fmin(tilt, 1.2) * 0.50));
-            @synchronized (settings_rc_lock()) {
-                if (!settings_gravity_motion_can_remote_call(generation, mm) ||
-                    g_gravitylite_physics_active == 0) return;
-                gravitylite_update_gravity_angle_in_session(angle, effectiveMagnitude);
-            }
+            settings_gravity_submit_tilt_async(angle,
+                                               effectiveMagnitude,
+                                               generation,
+                                               mm);
         }];
     }
     printf("[GRAVITY] Double-shake detector armed — two hard shakes toggle physics; tilt steering active only while physics is ON (magnitude=%.1fx)\n",
@@ -924,6 +998,7 @@ static void settings_stop_gravity_motion(void)
     __sync_add_and_fetch(&g_gravity_motion_generation, 1);
     settings_gravity_reset_shake_detector();
     settings_gravity_reset_page_tracking();
+    __sync_lock_test_and_set(&g_gravity_tilt_next_submit_us, 0);
     CMMotionManager *mm = g_gravity_motion_manager;
     if (!mm) return;
     g_gravity_motion_manager = nil;
@@ -1068,7 +1143,7 @@ static void settings_stop_gravity_motion(void)
     path.write_text(text, encoding="utf-8")
     gravity_path.write_text(gravity_text, encoding="utf-8")
     header_path.write_text(header_text, encoding="utf-8")
-    print("[GRAVITY-SHAKE] v3 page-handoff + animated-restore patched SettingsViewController.m + gravitylite core")
+    print("[GRAVITY-SHAKE] v3.2 nonblocking shake-off + page-handoff + animated-restore patched SettingsViewController.m + gravitylite core")
     print("[GRAVITY-SHAKE] keep-alive audio is reused from Cyanide's existing DSKeepAlive; no new audio session is added")
 
 
