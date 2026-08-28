@@ -571,6 +571,9 @@ static const double kPerfHUDWidth = 292.0;
 static const double kPerfHUDFontPt = 12.5;
 static const double kPerfHUDLandscapeTopInset = 8.0;
 static const double kPerfHUDPortraitGapBelowSafeArea = 4.0;
+static const double kPerfHUDOrientationPollInterval = 0.75;
+static const double kPerfHUDOutlineRadius = 0.45;
+static const float kPerfHUDOutlineOpacity = 0.88f;
 static const double kPerfHUDWindowLevel = 999999.0;
 
 static uint64_t gStatBarApplyTick = 0;
@@ -591,6 +594,7 @@ static int gPerfHUDLastDeviceOrientation = 1; // UIDeviceOrientationPortrait fal
 static int gPerfHUDLastFrontOrientation = 1;  // UIInterfaceOrientationPortrait
 static int gPerfHUDLastAppliedFrontOrientation = 0;
 static int gPerfHUDLastAppliedSceneOrientation = 0;
+static double gPerfHUDLastOrientationPollTime = 0.0;
 
 static bool statbar_should_log_tick(void)
 {
@@ -816,12 +820,14 @@ static void perfhud_style_label(uint64_t label)
     if (r_is_objc_ptr(font)) r_msg2_main(label, "setFont:", font, 0, 0, 0);
 
     uint64_t UIColor = r_class("UIColor");
+    uint64_t clear = 0;
     if (r_is_objc_ptr(UIColor)) {
-        uint64_t clear = r_msg2_main(UIColor, "clearColor", 0, 0, 0, 0);
+        clear = r_msg2_main(UIColor, "clearColor", 0, 0, 0, 0);
         if (r_is_objc_ptr(clear)) {
             r_msg2_main(label, "setBackgroundColor:", clear, 0, 0, 0);
-            // v1 used a solid black UILabel shadow. It looked like a strange
-            // outline/halo on light apps, so v2 deliberately has no shadow.
+            // Keep UILabel's old offset text shadow disabled. Readability is
+            // handled by a centered CALayer outline below, so light screens do
+            // not get the ugly one-sided halo seen in PerfHUD v1.
             r_msg2_main(label, "setShadowColor:", clear, 0, 0, 0);
         }
     }
@@ -832,6 +838,28 @@ static void perfhud_style_label(uint64_t label)
     r_msg2_main(label, "setAdjustsFontSizeToFitWidth:", 1, 0, 0, 0);
     r_send_double_main(label, "setMinimumScaleFactor:", 0.78);
     r_msg2_main(label, "setUserInteractionEnabled:", 0, 0, 0, 0);
+
+    // Thin, centered dark outline. CALayer shadows follow the rendered glyph
+    // alpha when shadowPath is nil, so zero offset + a tiny radius reads as a
+    // symmetric outline instead of a directional drop shadow.
+    uint64_t layer = r_msg2_main(label, "layer", 0, 0, 0, 0);
+    if (r_is_objc_ptr(layer) && r_is_objc_ptr(UIColor)) {
+        uint64_t black = r_msg2_main(UIColor, "blackColor", 0, 0, 0, 0);
+        uint64_t cgBlack = r_is_objc_ptr(black)
+            ? r_msg2_main(black, "CGColor", 0, 0, 0, 0)
+            : 0;
+        if (cgBlack) r_msg2_main(layer, "setShadowColor:", cgBlack, 0, 0, 0);
+
+        float opacity = kPerfHUDOutlineOpacity;
+        r_msg2_main_raw(layer, "setShadowOpacity:",
+                        &opacity, sizeof(opacity),
+                        NULL, 0,
+                        NULL, 0,
+                        NULL, 0);
+        r_send_double_main(layer, "setShadowRadius:", kPerfHUDOutlineRadius);
+        r_send_size_main(layer, "setShadowOffset:", 0.0, 0.0);
+        r_msg2_main(layer, "setMasksToBounds:", 0, 0, 0, 0);
+    }
 }
 
 static uint64_t perfhud_constraint_equal_anchor(uint64_t anchor, uint64_t otherAnchor)
@@ -1070,8 +1098,33 @@ static bool perfhud_update_orientation_layout(void)
 {
     if (!r_is_objc_ptr(gPerfHUDWindow) || !r_is_objc_ptr(gPerfHUDStack)) return false;
 
-    int frontOrientation = perfhud_read_frontmost_orientation_remote();
-    int sceneOrientation = perfhud_read_scene_orientation_remote(gPerfHUDWindow);
+    // Orientation is slow-changing state, not a performance metric. Poll it at
+    // a human-scale cadence instead of burning several SpringBoard RemoteCalls
+    // on every 20 Hz metric refresh.
+    double now = perfhud_monotonic_seconds();
+    if (gPerfHUDLastAppliedFrontOrientation != 0 &&
+        gPerfHUDLastAppliedSceneOrientation != 0 &&
+        gPerfHUDLastOrientationPollTime > 0.0 &&
+        now > 0.0 &&
+        (now - gPerfHUDLastOrientationPollTime) < kPerfHUDOrientationPollInterval) {
+        return true;
+    }
+    if (now > 0.0) gPerfHUDLastOrientationPollTime = now;
+
+    // remote_objc's global default settle is intentionally conservative
+    // (50 ms per Objective-C helper call). That is useful for one-shot tweaks
+    // but makes a handful of orientation reads stall the HUD for hundreds of
+    // milliseconds. A tiny settle is sufficient for these cached read-only
+    // selectors, and the old value is restored immediately afterward.
+    uint32_t oldSettleUS = r_settle_us(2000);
+    int frontOrientation = 0;
+    int sceneOrientation = 0;
+    @try {
+        frontOrientation = perfhud_read_frontmost_orientation_remote();
+        sceneOrientation = perfhud_read_scene_orientation_remote(gPerfHUDWindow);
+    } @finally {
+        r_settle_us(oldSettleUS);
+    }
 
     if (frontOrientation == gPerfHUDLastAppliedFrontOrientation &&
         sceneOrientation == gPerfHUDLastAppliedSceneOrientation) {
@@ -1192,6 +1245,7 @@ static bool perfhud_find_or_create_overlay(void)
             gPerfHUDRAMLabel = ram;
             gPerfHUDLastAppliedFrontOrientation = 0;
             gPerfHUDLastAppliedSceneOrientation = 0;
+            gPerfHUDLastOrientationPollTime = 0.0;
             r_msg2_main(cachedWin, "setHidden:", 0, 0, 0, 0);
             return true;
         }
@@ -1245,9 +1299,10 @@ static bool perfhud_find_or_create_overlay(void)
     gPerfHUDRAMLabel = ram;
     gPerfHUDLastAppliedFrontOrientation = 0;
     gPerfHUDLastAppliedSceneOrientation = 0;
+    gPerfHUDLastOrientationPollTime = 0.0;
 
     if (statbar_should_log_tick()) {
-        printf("[PERFHUD] installed v4 frontmost-orientation overlay\n");
+        printf("[PERFHUD] installed v5 fast/readable overlay\n");
     }
     return true;
 }
@@ -1363,6 +1418,7 @@ void statbar_forget_remote_state(void)
     gPerfHUDLastDeviceOrientation = 1;
     gPerfHUDLastAppliedFrontOrientation = 0;
     gPerfHUDLastAppliedSceneOrientation = 0;
+    gPerfHUDLastOrientationPollTime = 0.0;
     perfhud_forget_color_cache();
 
     printf("[PERFHUD] forgot remote overlay state\n");
