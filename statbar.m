@@ -79,10 +79,20 @@ static bool ensure_remote_iokit_loaded(void)
 // CPU / RAM metrics (local, system-wide)
 // =============================================================================
 
+static double perfhud_monotonic_seconds(void)
+{
+    struct timespec ts = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
 static double read_cpu_percent(void)
 {
     static bool havePrev = false;
     static natural_t prevTicks[CPU_STATE_MAX] = {0};
+    static double lastGood = -1.0;
+    static double smoothed = -1.0;
+    static double lastGoodTime = 0.0;
 
     mach_port_t host = mach_host_self();
     host_cpu_load_info_data_t info;
@@ -90,12 +100,21 @@ static double read_cpu_percent(void)
     kern_return_t kr = host_statistics(host, HOST_CPU_LOAD_INFO,
                                        (host_info_t)&info, &count);
     mach_port_deallocate(mach_task_self(), host);
-    if (kr != KERN_SUCCESS) return -1.0;
+
+    double now = perfhud_monotonic_seconds();
+    if (kr != KERN_SUCCESS) {
+        // A single failed host_statistics sample should not make the HUD flash
+        // CPU --. Reuse the last trustworthy value for a short grace window.
+        if (lastGood >= 0.0 && now > 0.0 && lastGoodTime > 0.0 && (now - lastGoodTime) <= 3.0) {
+            return lastGood;
+        }
+        return -1.0;
+    }
 
     if (!havePrev) {
         memcpy(prevTicks, info.cpu_ticks, sizeof(prevTicks));
         havePrev = true;
-        return -1.0;
+        return lastGood;
     }
 
     natural_t dUser = info.cpu_ticks[CPU_STATE_USER] - prevTicks[CPU_STATE_USER];
@@ -106,10 +125,31 @@ static double read_cpu_percent(void)
 
     uint64_t busy = (uint64_t)dUser + (uint64_t)dSys + (uint64_t)dNice;
     uint64_t total = busy + (uint64_t)dIdle;
-    if (total == 0) return -1.0;
+    if (total == 0) {
+        // At sub-second refresh rates two reads can occasionally land before
+        // the kernel tick counters advance. Keep the previous visible value.
+        if (lastGood >= 0.0 && now > 0.0 && lastGoodTime > 0.0 && (now - lastGoodTime) <= 3.0) {
+            return lastGood;
+        }
+        return -1.0;
+    }
 
-    double pct = 100.0 * (double)busy / (double)total;
-    return fmin(100.0, fmax(0.0, pct));
+    double raw = 100.0 * (double)busy / (double)total;
+    raw = fmin(100.0, fmax(0.0, raw));
+
+    // A light EMA takes the edge off very short sampling jitter without making
+    // the number lag behind real load changes. 0.45 still reacts quickly at
+    // 0.25-0.50 second refresh intervals.
+    if (smoothed < 0.0 || !isfinite(smoothed)) {
+        smoothed = raw;
+    } else {
+        const double alpha = 0.45;
+        smoothed = alpha * raw + (1.0 - alpha) * smoothed;
+    }
+
+    lastGood = fmin(100.0, fmax(0.0, smoothed));
+    if (now > 0.0) lastGoodTime = now;
+    return lastGood;
 }
 
 static double read_ram_percent(void)
@@ -503,12 +543,26 @@ typedef struct {
 } RCGSize64;
 
 typedef struct {
+    double x;
+    double y;
+} RCPoint64;
+
+typedef struct {
+    double a;
+    double b;
+    double c;
+    double d;
+    double tx;
+    double ty;
+} RCAffineTransform64;
+
+typedef struct {
     double r;
     double g;
     double b;
 } PerfRGB;
 
-static const uint64_t kPerfHUDStackTag = 99500;
+static const uint64_t kPerfHUDStackTag = 99600;
 static const uint64_t kPerfHUDCPUTag = 99501;
 static const uint64_t kPerfHUDGPUTag = 99502;
 static const uint64_t kPerfHUDRAMTag = 99503;
@@ -520,6 +574,7 @@ static const double kPerfHUDWindowLevel = 999999.0;
 
 static uint64_t gStatBarApplyTick = 0;
 static uint64_t gPerfHUDWindow = 0;
+static uint64_t gPerfHUDStack = 0;
 static uint64_t gPerfHUDCPULabel = 0;
 static uint64_t gPerfHUDGPULabel = 0;
 static uint64_t gPerfHUDRAMLabel = 0;
@@ -531,6 +586,9 @@ static uint64_t gPerfHUDPerformMainSel = 0;
 static uint64_t gPerfHUDColorCache[5] = {0};
 static uint64_t gPerfHUDInvalidColor = 0;
 static int gPerfHUDLastColorBucket[3] = { -999, -999, -999 };
+static int gPerfHUDLastDeviceOrientation = 1; // UIDeviceOrientationPortrait
+static int gPerfHUDLastAppliedDeviceOrientation = 0;
+static int gPerfHUDLastAppliedSceneOrientation = 0;
 
 static bool statbar_should_log_tick(void)
 {
@@ -574,6 +632,35 @@ static bool r_send_size_main(uint64_t obj, const char *selName,
                     NULL, 0,
                     NULL, 0);
     usleep(15000);
+    return true;
+}
+
+static bool r_send_point_main(uint64_t obj, const char *selName,
+                              double x, double y)
+{
+    if (!r_is_objc_ptr(obj)) return false;
+    RCPoint64 point = { x, y };
+    r_msg2_main_raw(obj, selName,
+                    &point, sizeof(point),
+                    NULL, 0,
+                    NULL, 0,
+                    NULL, 0);
+    usleep(12000);
+    return true;
+}
+
+static bool r_send_transform_main(uint64_t obj, const char *selName, double radians)
+{
+    if (!r_is_objc_ptr(obj)) return false;
+    double c = cos(radians);
+    double sn = sin(radians);
+    RCAffineTransform64 t = { c, sn, -sn, c, 0.0, 0.0 };
+    r_msg2_main_raw(obj, selName,
+                    &t, sizeof(t),
+                    NULL, 0,
+                    NULL, 0,
+                    NULL, 0);
+    usleep(12000);
     return true;
 }
 
@@ -835,7 +922,7 @@ static bool perfhud_build_adaptive_content(uint64_t win,
     r_msg2_main(stack, "setDistribution:", 1, 0, 0, 0);  // fill equally
     r_msg2_main(stack, "setAlignment:", 0, 0, 0, 0);     // fill
     r_send_double_main(stack, "setSpacing:", 4.0);
-    r_msg2_main(stack, "setTranslatesAutoresizingMaskIntoConstraints:", 0, 0, 0, 0);
+    r_msg2_main(stack, "setTranslatesAutoresizingMaskIntoConstraints:", 1, 0, 0, 0);
     r_msg2_main(stack, "setUserInteractionEnabled:", 0, 0, 0, 0);
 
     uint64_t cpu = perfhud_create_label(kPerfHUDCPUTag);
@@ -848,30 +935,17 @@ static bool perfhud_build_adaptive_content(uint64_t win,
     r_msg2_main(stack, "addArrangedSubview:", ram, 0, 0, 0);
     r_msg2_main(rootView, "addSubview:", stack, 0, 0, 0);
 
-    uint64_t stackCenterX = r_msg2_main(stack, "centerXAnchor", 0, 0, 0, 0);
-    uint64_t rootCenterX = r_msg2_main(rootView, "centerXAnchor", 0, 0, 0, 0);
-    uint64_t stackTop = r_msg2_main(stack, "topAnchor", 0, 0, 0, 0);
-    uint64_t safeGuide = r_msg2_main(rootView, "safeAreaLayoutGuide", 0, 0, 0, 0);
-    uint64_t safeTop = r_is_objc_ptr(safeGuide)
-        ? r_msg2_main(safeGuide, "topAnchor", 0, 0, 0, 0)
-        : 0;
-    uint64_t stackWidth = r_msg2_main(stack, "widthAnchor", 0, 0, 0, 0);
-    uint64_t stackHeight = r_msg2_main(stack, "heightAnchor", 0, 0, 0, 0);
+    // v3 deliberately does NOT constrain the HUD to SpringBoard's safe area.
+    // SpringBoard's UIWindowScene can stay portrait while the foreground game
+    // is landscape. The update loop therefore positions / pre-rotates this
+    // stack from the physical device orientation when the scene does not rotate.
+    r_send_rect_main(stack, "setBounds:", 0.0, 0.0, kPerfHUDWidth, kPerfHUDHeight);
+    r_send_point_main(stack, "setCenter:", 196.5, kPerfHUDTopInset + kPerfHUDHeight * 0.5);
+    r_send_transform_main(stack, "setTransform:", 0.0);
+    r_msg2_main(stack, "layoutIfNeeded", 0, 0, 0, 0);
 
-    uint64_t c1 = perfhud_constraint_equal_anchor(stackCenterX, rootCenterX);
-    uint64_t c2 = perfhud_constraint_equal_anchor_constant(stackTop, safeTop, kPerfHUDTopInset);
-    uint64_t c3 = perfhud_constraint_equal_constant(stackWidth, kPerfHUDWidth);
-    uint64_t c4 = perfhud_constraint_equal_constant(stackHeight, kPerfHUDHeight);
-    if (!perfhud_activate_constraint(c1) ||
-        !perfhud_activate_constraint(c2) ||
-        !perfhud_activate_constraint(c3) ||
-        !perfhud_activate_constraint(c4)) {
-        return false;
-    }
-
-    // Giving the overlay its own root view controller is the important v2
-    // change. UIKit then rotates and re-lays out the HUD with the UIWindowScene
-    // instead of rotating a tiny manually-framed window into a vertical strip.
+    // Keep a root view controller so the window remains a normal UIKit window;
+    // orientation compensation itself is handled explicitly by v3 below.
     r_msg2_main(win, "setRootViewController:", vc, 0, 0, 0);
     r_msg2_main(win, "setUserInteractionEnabled:", 0, 0, 0, 0);
     r_send_double_main(win, "setWindowLevel:", kPerfHUDWindowLevel);
@@ -879,6 +953,110 @@ static bool perfhud_build_adaptive_content(uint64_t win,
     if (outCPU) *outCPU = cpu;
     if (outGPU) *outGPU = gpu;
     if (outRAM) *outRAM = ram;
+    return true;
+}
+
+static int perfhud_read_device_orientation_remote(void)
+{
+    uint64_t UIDevice = r_class("UIDevice");
+    if (!r_is_objc_ptr(UIDevice)) return gPerfHUDLastDeviceOrientation;
+
+    uint64_t device = r_msg2_main(UIDevice, "currentDevice", 0, 0, 0, 0);
+    if (!r_is_objc_ptr(device)) return gPerfHUDLastDeviceOrientation;
+
+    // SpringBoard stays alive, so generating orientation updates here is more
+    // reliable than asking the background Cyanide app which way it is facing.
+    r_msg2_main(device, "beginGeneratingDeviceOrientationNotifications", 0, 0, 0, 0);
+    uint64_t raw = r_msg2_main(device, "orientation", 0, 0, 0, 0);
+    int orientation = (int)raw;
+
+    // 1 portrait, 2 upside-down, 3 landscape-left, 4 landscape-right.
+    // Face-up / face-down / unknown retain the last real orientation so the HUD
+    // does not suddenly spin when the phone is held flat during a game.
+    if (orientation >= 1 && orientation <= 4) {
+        gPerfHUDLastDeviceOrientation = orientation;
+    }
+    return gPerfHUDLastDeviceOrientation;
+}
+
+static int perfhud_read_scene_orientation_remote(uint64_t win)
+{
+    if (!r_is_objc_ptr(win)) return 0;
+    uint64_t scene = r_msg2_main(win, "windowScene", 0, 0, 0, 0);
+    if (!r_is_objc_ptr(scene)) return 0;
+    uint64_t sel = r_sel("interfaceOrientation");
+    if (!sel) return 0;
+    uint64_t responds = r_msg2_main(scene, "respondsToSelector:", sel, 0, 0, 0);
+    if (!responds) return 0;
+    uint64_t raw = r_msg2_main(scene, "interfaceOrientation", 0, 0, 0, 0);
+    int orientation = (int)raw;
+    return (orientation >= 1 && orientation <= 4) ? orientation : 0;
+}
+
+static bool perfhud_update_orientation_layout(void)
+{
+    if (!r_is_objc_ptr(gPerfHUDWindow) || !r_is_objc_ptr(gPerfHUDStack)) return false;
+
+    int deviceOrientation = perfhud_read_device_orientation_remote();
+    int sceneOrientation = perfhud_read_scene_orientation_remote(gPerfHUDWindow);
+
+    // Orientation checks happen on every metric tick, but geometry does not need
+    // to be rewritten when nothing changed. At 0.25-0.30s refresh rates this
+    // removes several RemoteCall/main-thread messages from almost every tick.
+    if (deviceOrientation == gPerfHUDLastAppliedDeviceOrientation &&
+        sceneOrientation == gPerfHUDLastAppliedSceneOrientation) {
+        return true;
+    }
+
+    CGSize localBounds = UIScreen.mainScreen.bounds.size;
+    double shortSide = fmin((double)localBounds.width, (double)localBounds.height);
+    double longSide  = fmax((double)localBounds.width, (double)localBounds.height);
+    if (shortSide < 100.0 || longSide < shortSide) {
+        shortSide = 393.0;
+        longSide = 852.0;
+    }
+
+    double cx = shortSide * 0.5;
+    double cy = kPerfHUDTopInset + kPerfHUDHeight * 0.5;
+    double angle = 0.0;
+
+    bool deviceLandscape = (deviceOrientation == 3 || deviceOrientation == 4);
+    bool sceneLandscape = (sceneOrientation == 3 || sceneOrientation == 4);
+
+    if (deviceLandscape && sceneLandscape) {
+        // Some builds really do rotate SpringBoard's scene with the frontmost
+        // app. In that case UIKit already did the work; do not double-rotate.
+        cx = longSide * 0.5;
+        cy = kPerfHUDTopInset + kPerfHUDHeight * 0.5;
+        angle = 0.0;
+    } else if (deviceOrientation == 3) {
+        // Foreground UI is landscape-left while SpringBoard remains portrait.
+        // Pre-rotate clockwise and park the vertical stack on SpringBoard's
+        // right edge. The compositor's landscape rotation turns it into a
+        // horizontal HUD at the visual top edge.
+        cx = shortSide - (kPerfHUDTopInset + kPerfHUDHeight * 0.5);
+        cy = longSide * 0.5;
+        angle = M_PI_2;
+    } else if (deviceOrientation == 4) {
+        // Mirror of the landscape-left case.
+        cx = kPerfHUDTopInset + kPerfHUDHeight * 0.5;
+        cy = longSide * 0.5;
+        angle = -M_PI_2;
+    } else if (deviceOrientation == 2 && sceneOrientation != 2) {
+        // Portrait upside-down while SpringBoard remains portrait.
+        cx = shortSide * 0.5;
+        cy = longSide - (kPerfHUDTopInset + kPerfHUDHeight * 0.5);
+        angle = M_PI;
+    }
+
+    r_send_transform_main(gPerfHUDStack, "setTransform:", 0.0);
+    r_send_rect_main(gPerfHUDStack, "setBounds:", 0.0, 0.0, kPerfHUDWidth, kPerfHUDHeight);
+    r_send_point_main(gPerfHUDStack, "setCenter:", cx, cy);
+    r_send_transform_main(gPerfHUDStack, "setTransform:", angle);
+    r_msg2_main(gPerfHUDStack, "layoutIfNeeded", 0, 0, 0, 0);
+
+    gPerfHUDLastAppliedDeviceOrientation = deviceOrientation;
+    gPerfHUDLastAppliedSceneOrientation = sceneOrientation;
     return true;
 }
 
@@ -925,16 +1103,19 @@ static bool perfhud_find_or_create_overlay(void)
         if (r_is_objc_ptr(stack) && r_is_objc_ptr(cpu) &&
             r_is_objc_ptr(gpu) && r_is_objc_ptr(ram)) {
             gPerfHUDWindow = cachedWin;
+            gPerfHUDStack = stack;
             gPerfHUDCPULabel = cpu;
             gPerfHUDGPULabel = gpu;
             gPerfHUDRAMLabel = ram;
+            gPerfHUDLastAppliedDeviceOrientation = 0;
+            gPerfHUDLastAppliedSceneOrientation = 0;
             r_msg2_main(cachedWin, "setHidden:", 0, 0, 0, 0);
             return true;
         }
 
-        // This also deliberately replaces the v1 mini-window. Its frame was
-        // manually calculated and UIWindowScene rotated it into the left-side
-        // vertical strip seen in landscape screenshots.
+        // Deliberately replace older layouts. v3 uses a different stack tag so
+        // an already-running v1/v2 overlay cannot keep the broken landscape
+        // geometry after an app update.
         r_msg2_main(cachedWin, "setHidden:", 1, 0, 0, 0);
         r_dlsym_call(R_TIMEOUT, "objc_setAssociatedObject",
                      app, assocKey, 0, 1, 0, 0, 0, 0);
@@ -975,12 +1156,15 @@ static bool perfhud_find_or_create_overlay(void)
                  app, assocKey, win, 1, 0, 0, 0, 0);
 
     gPerfHUDWindow = win;
+    gPerfHUDStack = r_msg2_main(r_msg2_main(r_msg2_main(win, "rootViewController", 0, 0, 0, 0), "view", 0, 0, 0, 0), "viewWithTag:", kPerfHUDStackTag, 0, 0, 0);
     gPerfHUDCPULabel = cpu;
     gPerfHUDGPULabel = gpu;
     gPerfHUDRAMLabel = ram;
+    gPerfHUDLastAppliedDeviceOrientation = 0;
+    gPerfHUDLastAppliedSceneOrientation = 0;
 
     if (statbar_should_log_tick()) {
-        printf("[PERFHUD] installed adaptive root-VC 3-metric overlay\n");
+        printf("[PERFHUD] installed v3.1 orientation-aware 3-metric overlay\n");
     }
     return true;
 }
@@ -1019,6 +1203,7 @@ static bool perfhud_update_label(uint64_t label,
 static bool perfhud_update(double cpu, double gpu, double ram)
 {
     if (!perfhud_find_or_create_overlay()) return false;
+    if (!perfhud_update_orientation_layout()) return false;
 
     bool ok = true;
     ok &= perfhud_update_label(gPerfHUDCPULabel, 0, "CPU", cpu);
@@ -1055,12 +1240,15 @@ bool statbar_stop_in_session(void)
     }
 
     gPerfHUDWindow = 0;
+    gPerfHUDStack = 0;
     gPerfHUDCPULabel = 0;
     gPerfHUDGPULabel = 0;
     gPerfHUDRAMLabel = 0;
     gPerfHUDLastColorBucket[0] = -999;
     gPerfHUDLastColorBucket[1] = -999;
     gPerfHUDLastColorBucket[2] = -999;
+    gPerfHUDLastAppliedDeviceOrientation = 0;
+    gPerfHUDLastAppliedSceneOrientation = 0;
     gRemoteIOKitLoaded = false;
     printf("[PERFHUD] overlay stopped\n");
     return true;
@@ -1077,6 +1265,7 @@ void statbar_forget_remote_state(void)
     gRemoteIOKitLoaded = false;
 
     gPerfHUDWindow = 0;
+    gPerfHUDStack = 0;
     gPerfHUDCPULabel = 0;
     gPerfHUDGPULabel = 0;
     gPerfHUDRAMLabel = 0;
@@ -1088,6 +1277,9 @@ void statbar_forget_remote_state(void)
     gPerfHUDInitUTF8Sel = 0;
     gPerfHUDSetTextSel = 0;
     gPerfHUDPerformMainSel = 0;
+    gPerfHUDLastDeviceOrientation = 1;
+    gPerfHUDLastAppliedDeviceOrientation = 0;
+    gPerfHUDLastAppliedSceneOrientation = 0;
     perfhud_forget_color_cache();
 
     printf("[PERFHUD] forgot remote overlay state\n");

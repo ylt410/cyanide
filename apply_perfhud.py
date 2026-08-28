@@ -88,7 +88,7 @@ def main() -> None:
         return @"Live overlay. When enabled, StatBar keeps a SpringBoard RemoteCall session open. Refresh rate applies when Cyanide is minimized but the screen is still awake; StatBar pauses while the screen is locked or asleep.";
     }'''
     new_footer = '''    if (s == SectionStatBar) {
-        return @"Transparent CPU / GPU / RAM performance HUD. The overlay follows portrait/landscape orientation automatically and uses no text shadow. GPU uses IOKit statistics when available and safely shows -- when unavailable. Refresh interval supports 0.25-5.00 seconds; the HUD pauses while the screen is locked or asleep.";
+        return @"Transparent CPU / GPU / RAM performance HUD. The overlay explicitly follows physical device orientation across portrait/landscape games and uses no text shadow. CPU keeps the last valid sample through brief sub-second tick gaps instead of flashing --. GPU uses IOKit statistics when available and safely shows -- when unavailable. Refresh interval supports 0.25-5.00 seconds; the HUD pauses while the screen is locked or asleep.";
     }'''
 
     old_refresh_clock = '''static useconds_t settings_statbar_refresh_rate_us(void)
@@ -124,7 +124,7 @@ def main() -> None:
     new_catalog = '''        Package *statBar = [[Package alloc] initWithIdentifier:@"com.darksword.statbar"
                                            name:@"PerfHUD"
                                shortDescription:@"Live CPU / GPU / RAM overlay"
-                                longDescription:@"Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. The HUD follows portrait/landscape orientation automatically, uses no background or text shadow, and colors each metric independently as load rises.\\n\\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.25 to 5.00 seconds in Settings."
+                                longDescription:@"Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. The HUD explicitly compensates for physical portrait/landscape orientation, uses no background or text shadow, and colors each metric independently as load rises.\\n\\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.25 to 5.00 seconds in Settings."
                                         version:version
                                          author:@"zeroxjf / custom PerfHUD fork"
                                        category:@"Performance"
@@ -154,7 +154,7 @@ def main() -> None:
     settings_path.write_text(settings_new, encoding="utf-8")
     catalog_path.write_text(catalog_new, encoding="utf-8")
 
-    print("[PerfHUD] v2 patch applied successfully")
+    print("[PerfHUD] v3.1 patch applied successfully")
     print(f"[PerfHUD] backup: {backup}")
     print("[PerfHUD] next: ./scripts/build.sh")
 
