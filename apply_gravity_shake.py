@@ -946,15 +946,29 @@ static void settings_stop_gravity_motion(void)
 }'''
     text = replace_once(text, old_request, new_request, "gravity stop request")
 
-    apply_start = "static bool settings_apply_gravitylite_from_defaults_locked(NSUserDefaults *d)"
-    apply_end = "static void settings_restart_gravity_motion_if_active(const char *reason)"
+    old_apply = r'''static bool settings_apply_gravitylite_from_defaults_locked(NSUserDefaults *d)
+{
+    if (![d boolForKey:kSettingsGravityLiteEnabled]) return false;
+    return gravitylite_apply_in_session(settings_gravitylite_config_from_defaults(d));
+}'''
     new_apply = r'''static bool settings_apply_gravitylite_from_defaults_locked(NSUserDefaults *d)
 {
     // Gravity Lite is now an armed shake gesture instead of an immediate
     // physics apply. The first double-shake starts physics; the next restores.
     return settings_arm_gravitylite_for_background_start_locked(d, "apply");
 }'''
-    text = replace_region(text, apply_start, apply_end, new_apply, "gravity apply semantics")
+    text = replace_once(text, old_apply, new_apply, "gravity apply semantics")
+
+    # Compile-safety guard: these FastLockX helpers live immediately after the
+    # Gravity apply helper in upstream SettingsViewController.m. Never consume
+    # them as part of a broad region replacement.
+    required_fastlock_helpers = (
+        "static double settings_fastlockx_lite_retry_interval(NSUserDefaults *d)",
+        "static FastLockXLiteConfig settings_fastlockx_lite_config_from_defaults(NSUserDefaults *d,",
+    )
+    for helper in required_fastlock_helpers:
+        if helper not in text:
+            raise RuntimeError(f"compile-safety guard failed: missing {helper}")
 
     arm_start = "static bool settings_arm_gravitylite_for_background_start_locked(NSUserDefaults *d,\n                                                                 const char *reason)\n{"
     arm_end = "static BOOL settings_gravitylite_start_window_ready(const char *reason)"
