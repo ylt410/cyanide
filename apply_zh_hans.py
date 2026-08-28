@@ -49,7 +49,7 @@ def localize_package_catalog(root: Path) -> int:
     descriptions: dict[str, tuple[str, str]] = {
         "PerfHUD": (
             "实时 CPU / GPU / 内存透明悬浮监控",
-            "在 SpringBoard 上显示系统 CPU、GPU 和内存实时占用。各项指标会随负载从淡绿色逐渐变为黄色、橙色和红色。GPU 数据不可用时会安全显示 GPU --，不会让整个悬浮窗失效。刷新频率可在设置中调整。",
+            "在 SpringBoard 上显示系统 CPU、GPU 和内存实时占用。悬浮窗会自动适配横竖屏，不使用背景或文字阴影，并根据每项负载独立变色。GPU 数据不可用时会安全显示 GPU --。刷新间隔可在 0.25～5.00 秒之间调整。",
         ),
         "App Switcher Grid": (
             "将多任务切换器改成网格式布局",
@@ -187,8 +187,8 @@ def localize_package_catalog(root: Path) -> int:
     # PerfHUD custom entry is known and worth localizing even if formatting differs.
     text = text.replace(objc("Live CPU / GPU / RAM overlay"), objc("实时 CPU / GPU / 内存透明悬浮监控"))
     text = text.replace(
-        objc("Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. Each metric changes color as load rises: green at normal load, yellow/orange under heavier load, and red near saturation.\n\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU -- instead of failing the whole HUD. Refresh timing is adjustable in Settings."),
-        objc("在 SpringBoard 上以透明悬浮窗显示系统 CPU、GPU 和内存占用。各项指标会随负载从淡绿色逐渐变为黄色、橙色和红色。\n\nGPU 会优先读取 IOKit PerformanceStatistics；当前设备或系统构建无法提供可用数据时会安全显示 GPU --。刷新频率可在设置中调整。"),
+        objc("Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. The HUD follows portrait/landscape orientation automatically, uses no background or text shadow, and colors each metric independently as load rises.\n\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.25 to 5.00 seconds in Settings."),
+        objc("在 SpringBoard 上以透明悬浮窗显示系统 CPU、GPU 和内存占用。悬浮窗会自动适配横竖屏，不使用背景或文字阴影，并根据每项负载独立变色。\n\nGPU 会优先读取 IOKit PerformanceStatistics；当前设备或系统构建无法提供可用数据时会安全显示 GPU --。刷新间隔可在设置中调整为 0.25～5.00 秒。"),
     )
 
     if text != original:
@@ -421,6 +421,9 @@ def main() -> None:
         objc("Version"): objc("版本"),
         objc("Enable Tweak"): objc("启用插件"),
         objc("Refresh rate"): objc("刷新频率"),
+        objc("Refresh interval"): objc("刷新间隔"),
+        objc("0.25-5.00 seconds. 0.50s is a good fast default; lower values use more CPU/battery."): objc("可设置 0.25～5.00 秒。想要更实时建议用 0.50 秒；数值越低，CPU 与耗电开销越高。"),
+        objc("Transparent CPU / GPU / RAM performance HUD. The overlay follows portrait/landscape orientation automatically and uses no text shadow. GPU uses IOKit statistics when available and safely shows -- when unavailable. Refresh interval supports 0.25-5.00 seconds; the HUD pauses while the screen is locked or asleep."): objc("透明的 CPU / GPU / 内存性能悬浮窗。横竖屏会自动适配，并且不使用文字阴影。GPU 会在可用时读取 IOKit 统计数据，不可用时安全显示 --。刷新间隔支持 0.25～5.00 秒；锁屏或休眠时悬浮窗会暂停刷新。"),
         objc("Metrics"): objc("指标"),
         objc("Background"): objc("背景"),
         objc("Transparent"): objc("透明"),

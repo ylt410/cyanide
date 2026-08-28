@@ -61,9 +61,10 @@ def main() -> None:
     new_rows = '''- (NSArray<NSDictionary *> *)statbarRows
 {
     return @[
-        @{ @"kind": @"slider", @"key": kSettingsStatBarRefreshRateSec,
-           @"title": @"Refresh rate", @"min": @1, @"max": @30, @"step": @1,
-           @"unit": @"s", @"default": @(kStatBarDefaultRefreshRateSec) },
+        @{ @"kind": @"number", @"key": kSettingsStatBarRefreshRateSec,
+           @"title": @"Refresh interval", @"min": @0.25, @"max": @5.0, @"step": @0.05,
+           @"precision": @2, @"unit": @"s", @"default": @1.0,
+           @"subtitle": @"0.25-5.00 seconds. 0.50s is a good fast default; lower values use more CPU/battery." },
     ];
 }'''
 
@@ -77,8 +78,8 @@ def main() -> None:
 
     new_summary = '''        [out addObject:@{@"title": @"Metrics",             @"value": @"CPU / GPU / RAM"}];
         [out addObject:@{@"title": @"Background",          @"value": @"Transparent"}];
-        [out addObject:@{@"title": @"Refresh rate",        @"value": [NSString stringWithFormat:@"%lds",
-                                                                       (long)[d integerForKey:kSettingsStatBarRefreshRateSec]]}];'''
+        [out addObject:@{@"title": @"Refresh interval",    @"value": [NSString stringWithFormat:@"%.2fs",
+                                                                       [d doubleForKey:kSettingsStatBarRefreshRateSec]]}];'''
 
     old_bundle_row = '''        @{ @"title": @"StatBar",            @"icon": @"thermometer.medium",                  @"color": [UIColor systemRedColor],    @"section": @(SectionStatBar) },'''
     new_bundle_row = '''        @{ @"title": @"PerfHUD",            @"icon": @"speedometer",                        @"color": [UIColor systemOrangeColor], @"section": @(SectionStatBar) },'''
@@ -87,8 +88,25 @@ def main() -> None:
         return @"Live overlay. When enabled, StatBar keeps a SpringBoard RemoteCall session open. Refresh rate applies when Cyanide is minimized but the screen is still awake; StatBar pauses while the screen is locked or asleep.";
     }'''
     new_footer = '''    if (s == SectionStatBar) {
-        return @"Transparent CPU / GPU / RAM performance HUD. Each metric changes color with load. GPU uses IOKit statistics when available and safely shows -- when the current device/build does not expose a usable utilization value. The HUD pauses while the screen is locked or asleep.";
+        return @"Transparent CPU / GPU / RAM performance HUD. The overlay follows portrait/landscape orientation automatically and uses no text shadow. GPU uses IOKit statistics when available and safely shows -- when unavailable. Refresh interval supports 0.25-5.00 seconds; the HUD pauses while the screen is locked or asleep.";
     }'''
+
+    old_refresh_clock = '''static useconds_t settings_statbar_refresh_rate_us(void)
+{
+    NSInteger sec = [[NSUserDefaults standardUserDefaults] integerForKey:kSettingsStatBarRefreshRateSec];
+    if (sec <= 0) sec = kStatBarDefaultRefreshRateSec;
+    if (sec < 1) sec = 1;
+    if (sec > 30) sec = 30;
+    return (useconds_t)sec * 1000000;
+}'''
+    new_refresh_clock = '''static useconds_t settings_statbar_refresh_rate_us(void)
+{
+    double sec = [[NSUserDefaults standardUserDefaults] doubleForKey:kSettingsStatBarRefreshRateSec];
+    if (!isfinite(sec) || sec <= 0.0) sec = (double)kStatBarDefaultRefreshRateSec;
+    if (sec < 0.25) sec = 0.25;
+    if (sec > 5.0) sec = 5.0;
+    return (useconds_t)llround(sec * 1000000.0);
+}'''
 
     old_catalog = '''        Package *statBar = [[Package alloc] initWithIdentifier:@"com.darksword.statbar"
                                            name:@"StatBar"
@@ -106,7 +124,7 @@ def main() -> None:
     new_catalog = '''        Package *statBar = [[Package alloc] initWithIdentifier:@"com.darksword.statbar"
                                            name:@"PerfHUD"
                                shortDescription:@"Live CPU / GPU / RAM overlay"
-                                longDescription:@"Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. Each metric changes color as load rises: green at normal load, yellow/orange under heavier load, and red near saturation.\\n\\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU -- instead of failing the whole HUD. Refresh timing is adjustable in Settings."
+                                longDescription:@"Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. The HUD follows portrait/landscape orientation automatically, uses no background or text shadow, and colors each metric independently as load rises.\\n\\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.25 to 5.00 seconds in Settings."
                                         version:version
                                          author:@"zeroxjf / custom PerfHUD fork"
                                        category:@"Performance"
@@ -121,6 +139,7 @@ def main() -> None:
     settings_new = replace_exact(settings_new, old_summary, new_summary, "Settings: package summary")
     settings_new = replace_exact(settings_new, old_bundle_row, new_bundle_row, "Settings: bundle title")
     settings_new = replace_exact(settings_new, old_footer, new_footer, "Settings: footer")
+    settings_new = replace_exact(settings_new, old_refresh_clock, new_refresh_clock, "Settings: sub-second refresh clock")
     catalog_new = replace_exact(catalog, old_catalog, new_catalog, "PackageCatalog: PerfHUD package")
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -135,7 +154,7 @@ def main() -> None:
     settings_path.write_text(settings_new, encoding="utf-8")
     catalog_path.write_text(catalog_new, encoding="utf-8")
 
-    print(f"[PerfHUD] patched successfully")
+    print("[PerfHUD] v2 patch applied successfully")
     print(f"[PerfHUD] backup: {backup}")
     print("[PerfHUD] next: ./scripts/build.sh")
 

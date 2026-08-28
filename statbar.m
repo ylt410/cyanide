@@ -508,13 +508,14 @@ typedef struct {
     double b;
 } PerfRGB;
 
+static const uint64_t kPerfHUDStackTag = 99500;
 static const uint64_t kPerfHUDCPUTag = 99501;
 static const uint64_t kPerfHUDGPUTag = 99502;
 static const uint64_t kPerfHUDRAMTag = 99503;
 static const double kPerfHUDHeight = 24.0;
+static const double kPerfHUDWidth = 292.0;
 static const double kPerfHUDFontPt = 12.5;
-static const double kPerfHUDLandscapeY = 7.0;
-static const double kPerfHUDSideMargin = 8.0;
+static const double kPerfHUDTopInset = 1.0;
 static const double kPerfHUDWindowLevel = 999999.0;
 
 static uint64_t gStatBarApplyTick = 0;
@@ -621,8 +622,8 @@ static bool perfhud_set_text_fast(uint64_t label, uint64_t textObj)
 
 static int perfhud_color_bucket(double pct)
 {
-    if (pct < 60.0) return 0;   // soft green
-    if (pct < 70.0) return 1;   // yellow
+    if (pct < 60.0) return 0;   // green
+    if (pct < 70.0) return 1;   // amber
     if (pct < 85.0) return 2;   // orange
     if (pct < 95.0) return 3;   // orange-red
     return 4;                    // red
@@ -630,12 +631,14 @@ static int perfhud_color_bucket(double pct)
 
 static PerfRGB perfhud_rgb_for_bucket(int bucket)
 {
+    // Slightly stronger colors than v1 so the HUD stays readable on white /
+    // light app backgrounds without needing the old black text shadow.
     switch (bucket) {
-        case 0: return (PerfRGB){ 0.49, 0.92, 0.58 };
-        case 1: return (PerfRGB){ 0.95, 0.84, 0.36 };
-        case 2: return (PerfRGB){ 1.00, 0.61, 0.27 };
-        case 3: return (PerfRGB){ 1.00, 0.36, 0.22 };
-        default:return (PerfRGB){ 1.00, 0.18, 0.18 };
+        case 0: return (PerfRGB){ 0.20, 0.78, 0.35 }; // #34C759-ish
+        case 1: return (PerfRGB){ 0.79, 0.60, 0.00 }; // readable amber
+        case 2: return (PerfRGB){ 1.00, 0.58, 0.00 }; // system orange-ish
+        case 3: return (PerfRGB){ 1.00, 0.37, 0.23 };
+        default:return (PerfRGB){ 1.00, 0.23, 0.19 }; // system red-ish
     }
 }
 
@@ -655,8 +658,8 @@ static uint64_t perfhud_color_for_percent(double pct)
 {
     if (!isfinite(pct) || pct < 0.0) {
         if (r_is_objc_ptr(gPerfHUDInvalidColor)) return gPerfHUDInvalidColor;
-        PerfRGB gray = { 0.82, 0.82, 0.84 };
-        uint64_t c = perfhud_make_color(gray, 0.90);
+        PerfRGB gray = { 0.52, 0.52, 0.56 };
+        uint64_t c = perfhud_make_color(gray, 1.0);
         if (r_is_objc_ptr(c)) {
             r_msg2(c, "retain", 0, 0, 0, 0);
             gPerfHUDInvalidColor = c;
@@ -726,78 +729,55 @@ static void perfhud_style_label(uint64_t label)
     uint64_t UIColor = r_class("UIColor");
     if (r_is_objc_ptr(UIColor)) {
         uint64_t clear = r_msg2_main(UIColor, "clearColor", 0, 0, 0, 0);
-        uint64_t black = r_msg2_main(UIColor, "blackColor", 0, 0, 0, 0);
-        if (r_is_objc_ptr(clear)) r_msg2_main(label, "setBackgroundColor:", clear, 0, 0, 0);
-        if (r_is_objc_ptr(black)) r_msg2_main(label, "setShadowColor:", black, 0, 0, 0);
+        if (r_is_objc_ptr(clear)) {
+            r_msg2_main(label, "setBackgroundColor:", clear, 0, 0, 0);
+            // v1 used a solid black UILabel shadow. It looked like a strange
+            // outline/halo on light apps, so v2 deliberately has no shadow.
+            r_msg2_main(label, "setShadowColor:", clear, 0, 0, 0);
+        }
     }
 
-    r_send_size_main(label, "setShadowOffset:", 0.0, 1.0);
+    r_send_size_main(label, "setShadowOffset:", 0.0, 0.0);
     r_msg2_main(label, "setTextAlignment:", 1, 0, 0, 0);
     r_msg2_main(label, "setNumberOfLines:", 1, 0, 0, 0);
     r_msg2_main(label, "setAdjustsFontSizeToFitWidth:", 1, 0, 0, 0);
-    r_send_double_main(label, "setMinimumScaleFactor:", 0.75);
+    r_send_double_main(label, "setMinimumScaleFactor:", 0.78);
     r_msg2_main(label, "setUserInteractionEnabled:", 0, 0, 0, 0);
 }
 
-static bool perfhud_is_landscape(uint64_t win)
+static uint64_t perfhud_constraint_equal_anchor(uint64_t anchor, uint64_t otherAnchor)
 {
-    if (!r_is_objc_ptr(win)) return false;
-    uint64_t scene = r_msg2_main(win, "windowScene", 0, 0, 0, 0);
-    if (!r_is_objc_ptr(scene)) return false;
-    uint64_t orientation = r_msg2_main(scene, "interfaceOrientation", 0, 0, 0, 0);
-    return orientation == 3 || orientation == 4;
+    if (!r_is_objc_ptr(anchor) || !r_is_objc_ptr(otherAnchor)) return 0;
+    return r_msg2_main(anchor, "constraintEqualToAnchor:", otherAnchor, 0, 0, 0);
 }
 
-static double perfhud_portrait_y(double screenWidth, double screenHeight)
+static uint64_t perfhud_constraint_equal_anchor_constant(uint64_t anchor,
+                                                          uint64_t otherAnchor,
+                                                          double constant)
 {
-    double shortSide = fmin(screenWidth, screenHeight);
-    double longSide = fmax(screenWidth, screenHeight);
-
-    double topArea = 20.0;
-    if (longSide >= 852.0 && shortSide >= 390.0) topArea = 59.0;
-    else if (longSide >= 844.0 && shortSide >= 390.0) topArea = 47.0;
-    else if (longSide >= 812.0 && shortSide >= 375.0) topArea = 44.0;
-
-    if (topArea >= 36.0) return fmax(2.0, floor(topArea - (kPerfHUDHeight / 2.0)));
-    return fmax(2.0, floor((topArea - kPerfHUDHeight) / 2.0));
+    if (!r_is_objc_ptr(anchor) || !r_is_objc_ptr(otherAnchor)) return 0;
+    return r_msg2_main_raw(anchor, "constraintEqualToAnchor:constant:",
+                           &otherAnchor, sizeof(otherAnchor),
+                           &constant, sizeof(constant),
+                           NULL, 0,
+                           NULL, 0);
 }
 
-static bool perfhud_apply_layout(uint64_t win,
-                                 uint64_t cpuLabel,
-                                 uint64_t gpuLabel,
-                                 uint64_t ramLabel)
+static uint64_t perfhud_constraint_equal_constant(uint64_t anchor, double constant)
 {
-    if (!r_is_objc_ptr(win)) return false;
+    if (!r_is_objc_ptr(anchor)) return 0;
+    return r_msg2_main_raw(anchor, "constraintEqualToConstant:",
+                           &constant, sizeof(constant),
+                           NULL, 0,
+                           NULL, 0,
+                           NULL, 0);
+}
 
-    CGRect bounds = UIScreen.mainScreen.bounds;
-    double localW = fabs(bounds.size.width);
-    double localH = fabs(bounds.size.height);
-    if (localW < 100.0 || localH < 100.0) {
-        localW = 390.0;
-        localH = 844.0;
-    }
-
-    bool landscape = perfhud_is_landscape(win);
-    double screenWidth = landscape ? fmax(localW, localH) : fmin(localW, localH);
-    double screenHeight = landscape ? fmin(localW, localH) : fmax(localW, localH);
-
-    double width = landscape ? 286.0 : 276.0;
-    width = fmin(width, fmax(1.0, screenWidth - (kPerfHUDSideMargin * 2.0)));
-    double x = floor((screenWidth - width) / 2.0);
-    double y = landscape ? kPerfHUDLandscapeY : perfhud_portrait_y(screenWidth, screenHeight);
-
-    bool ok = true;
-    ok &= r_send_rect_main(win, "setFrame:", x, y, width, kPerfHUDHeight);
-    ok &= r_send_double_main(win, "setWindowLevel:", kPerfHUDWindowLevel);
-    r_msg2_main(win, "setUserInteractionEnabled:", 0, 0, 0, 0);
-
-    double gap = 4.0;
-    double slotW = (width - gap * 2.0) / 3.0;
-    if (r_is_objc_ptr(cpuLabel)) ok &= r_send_rect_main(cpuLabel, "setFrame:", 0.0, 0.0, slotW, kPerfHUDHeight);
-    if (r_is_objc_ptr(gpuLabel)) ok &= r_send_rect_main(gpuLabel, "setFrame:", slotW + gap, 0.0, slotW, kPerfHUDHeight);
-    if (r_is_objc_ptr(ramLabel)) ok &= r_send_rect_main(ramLabel, "setFrame:", (slotW + gap) * 2.0, 0.0, slotW, kPerfHUDHeight);
-
-    return ok;
+static bool perfhud_activate_constraint(uint64_t constraint)
+{
+    if (!r_is_objc_ptr(constraint)) return false;
+    r_msg2_main(constraint, "setActive:", 1, 0, 0, 0);
+    return true;
 }
 
 static uint64_t perfhud_create_label(uint64_t tag)
@@ -816,6 +796,92 @@ static uint64_t perfhud_create_label(uint64_t tag)
     return label;
 }
 
+static bool perfhud_build_adaptive_content(uint64_t win,
+                                           uint64_t *outCPU,
+                                           uint64_t *outGPU,
+                                           uint64_t *outRAM)
+{
+    if (!r_is_objc_ptr(win)) return false;
+
+    uint64_t UIViewController = r_class("UIViewController");
+    uint64_t UIStackView = r_class("UIStackView");
+    if (!r_is_objc_ptr(UIViewController) || !r_is_objc_ptr(UIStackView)) return false;
+
+    uint64_t vcAlloc = r_msg2_main(UIViewController, "alloc", 0, 0, 0, 0);
+    uint64_t vc = r_is_objc_ptr(vcAlloc) ? r_msg2_main(vcAlloc, "init", 0, 0, 0, 0) : 0;
+    if (!r_is_objc_ptr(vc)) return false;
+
+    uint64_t rootView = r_msg2_main(vc, "view", 0, 0, 0, 0);
+    if (!r_is_objc_ptr(rootView)) return false;
+
+    uint64_t UIColor = r_class("UIColor");
+    if (r_is_objc_ptr(UIColor)) {
+        uint64_t clear = r_msg2_main(UIColor, "clearColor", 0, 0, 0, 0);
+        if (r_is_objc_ptr(clear)) {
+            r_msg2_main(rootView, "setBackgroundColor:", clear, 0, 0, 0);
+            r_msg2_main(win, "setBackgroundColor:", clear, 0, 0, 0);
+        }
+    }
+    r_msg2_main(rootView, "setUserInteractionEnabled:", 0, 0, 0, 0);
+
+    uint64_t stackAlloc = r_msg2_main(UIStackView, "alloc", 0, 0, 0, 0);
+    uint64_t stack = r_is_objc_ptr(stackAlloc)
+        ? r_msg2_main(stackAlloc, "init", 0, 0, 0, 0)
+        : 0;
+    if (!r_is_objc_ptr(stack)) return false;
+
+    r_msg2_main(stack, "setTag:", kPerfHUDStackTag, 0, 0, 0);
+    r_msg2_main(stack, "setAxis:", 0, 0, 0, 0);          // horizontal
+    r_msg2_main(stack, "setDistribution:", 1, 0, 0, 0);  // fill equally
+    r_msg2_main(stack, "setAlignment:", 0, 0, 0, 0);     // fill
+    r_send_double_main(stack, "setSpacing:", 4.0);
+    r_msg2_main(stack, "setTranslatesAutoresizingMaskIntoConstraints:", 0, 0, 0, 0);
+    r_msg2_main(stack, "setUserInteractionEnabled:", 0, 0, 0, 0);
+
+    uint64_t cpu = perfhud_create_label(kPerfHUDCPUTag);
+    uint64_t gpu = perfhud_create_label(kPerfHUDGPUTag);
+    uint64_t ram = perfhud_create_label(kPerfHUDRAMTag);
+    if (!r_is_objc_ptr(cpu) || !r_is_objc_ptr(gpu) || !r_is_objc_ptr(ram)) return false;
+
+    r_msg2_main(stack, "addArrangedSubview:", cpu, 0, 0, 0);
+    r_msg2_main(stack, "addArrangedSubview:", gpu, 0, 0, 0);
+    r_msg2_main(stack, "addArrangedSubview:", ram, 0, 0, 0);
+    r_msg2_main(rootView, "addSubview:", stack, 0, 0, 0);
+
+    uint64_t stackCenterX = r_msg2_main(stack, "centerXAnchor", 0, 0, 0, 0);
+    uint64_t rootCenterX = r_msg2_main(rootView, "centerXAnchor", 0, 0, 0, 0);
+    uint64_t stackTop = r_msg2_main(stack, "topAnchor", 0, 0, 0, 0);
+    uint64_t safeGuide = r_msg2_main(rootView, "safeAreaLayoutGuide", 0, 0, 0, 0);
+    uint64_t safeTop = r_is_objc_ptr(safeGuide)
+        ? r_msg2_main(safeGuide, "topAnchor", 0, 0, 0, 0)
+        : 0;
+    uint64_t stackWidth = r_msg2_main(stack, "widthAnchor", 0, 0, 0, 0);
+    uint64_t stackHeight = r_msg2_main(stack, "heightAnchor", 0, 0, 0, 0);
+
+    uint64_t c1 = perfhud_constraint_equal_anchor(stackCenterX, rootCenterX);
+    uint64_t c2 = perfhud_constraint_equal_anchor_constant(stackTop, safeTop, kPerfHUDTopInset);
+    uint64_t c3 = perfhud_constraint_equal_constant(stackWidth, kPerfHUDWidth);
+    uint64_t c4 = perfhud_constraint_equal_constant(stackHeight, kPerfHUDHeight);
+    if (!perfhud_activate_constraint(c1) ||
+        !perfhud_activate_constraint(c2) ||
+        !perfhud_activate_constraint(c3) ||
+        !perfhud_activate_constraint(c4)) {
+        return false;
+    }
+
+    // Giving the overlay its own root view controller is the important v2
+    // change. UIKit then rotates and re-lays out the HUD with the UIWindowScene
+    // instead of rotating a tiny manually-framed window into a vertical strip.
+    r_msg2_main(win, "setRootViewController:", vc, 0, 0, 0);
+    r_msg2_main(win, "setUserInteractionEnabled:", 0, 0, 0, 0);
+    r_send_double_main(win, "setWindowLevel:", kPerfHUDWindowLevel);
+
+    if (outCPU) *outCPU = cpu;
+    if (outGPU) *outGPU = gpu;
+    if (outRAM) *outRAM = ram;
+    return true;
+}
+
 static bool perfhud_find_or_create_overlay(void)
 {
     if (r_is_objc_ptr(gPerfHUDWindow) &&
@@ -831,18 +897,33 @@ static bool perfhud_find_or_create_overlay(void)
     uint64_t app = r_msg2_main(UIApplication, "sharedApplication", 0, 0, 0, 0);
     if (!r_is_objc_ptr(app)) return false;
 
-    // Keep the original association key so old StatBar cleanup and upgrades
-    // can still find and remove a window created by a previous build.
+    // Keep the original association key so cleanup and upgrades can find the
+    // same overlay across PerfHUD revisions.
     uint64_t assocKey = r_sel("darkswordStatBarOverlayWindow");
     if (!assocKey) return false;
 
     uint64_t cachedWin = r_dlsym_call(R_TIMEOUT, "objc_getAssociatedObject",
                                       app, assocKey, 0, 0, 0, 0, 0, 0);
     if (r_is_objc_ptr(cachedWin)) {
-        uint64_t cpu = r_msg2_main(cachedWin, "viewWithTag:", kPerfHUDCPUTag, 0, 0, 0);
-        uint64_t gpu = r_msg2_main(cachedWin, "viewWithTag:", kPerfHUDGPUTag, 0, 0, 0);
-        uint64_t ram = r_msg2_main(cachedWin, "viewWithTag:", kPerfHUDRAMTag, 0, 0, 0);
-        if (r_is_objc_ptr(cpu) && r_is_objc_ptr(gpu) && r_is_objc_ptr(ram)) {
+        uint64_t rootVC = r_msg2_main(cachedWin, "rootViewController", 0, 0, 0, 0);
+        uint64_t rootView = r_is_objc_ptr(rootVC)
+            ? r_msg2_main(rootVC, "view", 0, 0, 0, 0)
+            : 0;
+        uint64_t stack = r_is_objc_ptr(rootView)
+            ? r_msg2_main(rootView, "viewWithTag:", kPerfHUDStackTag, 0, 0, 0)
+            : 0;
+        uint64_t cpu = r_is_objc_ptr(rootView)
+            ? r_msg2_main(rootView, "viewWithTag:", kPerfHUDCPUTag, 0, 0, 0)
+            : 0;
+        uint64_t gpu = r_is_objc_ptr(rootView)
+            ? r_msg2_main(rootView, "viewWithTag:", kPerfHUDGPUTag, 0, 0, 0)
+            : 0;
+        uint64_t ram = r_is_objc_ptr(rootView)
+            ? r_msg2_main(rootView, "viewWithTag:", kPerfHUDRAMTag, 0, 0, 0)
+            : 0;
+
+        if (r_is_objc_ptr(stack) && r_is_objc_ptr(cpu) &&
+            r_is_objc_ptr(gpu) && r_is_objc_ptr(ram)) {
             gPerfHUDWindow = cachedWin;
             gPerfHUDCPULabel = cpu;
             gPerfHUDGPULabel = gpu;
@@ -851,8 +932,9 @@ static bool perfhud_find_or_create_overlay(void)
             return true;
         }
 
-        // Old single-label StatBar window or a half-built HUD. Hide it and
-        // remove the association before constructing a clean three-label HUD.
+        // This also deliberately replaces the v1 mini-window. Its frame was
+        // manually calculated and UIWindowScene rotated it into the left-side
+        // vertical strip seen in landscape screenshots.
         r_msg2_main(cachedWin, "setHidden:", 1, 0, 0, 0);
         r_dlsym_call(R_TIMEOUT, "objc_setAssociatedObject",
                      app, assocKey, 0, 1, 0, 0, 0, 0);
@@ -882,25 +964,12 @@ static bool perfhud_find_or_create_overlay(void)
         : 0;
     if (!r_is_objc_ptr(win)) return false;
 
-    uint64_t UIColor = r_class("UIColor");
-    if (r_is_objc_ptr(UIColor)) {
-        uint64_t clear = r_msg2_main(UIColor, "clearColor", 0, 0, 0, 0);
-        if (r_is_objc_ptr(clear)) r_msg2_main(win, "setBackgroundColor:", clear, 0, 0, 0);
-    }
-
-    uint64_t cpu = perfhud_create_label(kPerfHUDCPUTag);
-    uint64_t gpu = perfhud_create_label(kPerfHUDGPUTag);
-    uint64_t ram = perfhud_create_label(kPerfHUDRAMTag);
-    if (!r_is_objc_ptr(cpu) || !r_is_objc_ptr(gpu) || !r_is_objc_ptr(ram)) {
+    uint64_t cpu = 0, gpu = 0, ram = 0;
+    if (!perfhud_build_adaptive_content(win, &cpu, &gpu, &ram)) {
         r_msg2_main(win, "setHidden:", 1, 0, 0, 0);
         return false;
     }
 
-    r_msg2_main(win, "addSubview:", cpu, 0, 0, 0);
-    r_msg2_main(win, "addSubview:", gpu, 0, 0, 0);
-    r_msg2_main(win, "addSubview:", ram, 0, 0, 0);
-
-    perfhud_apply_layout(win, cpu, gpu, ram);
     r_msg2_main(win, "setHidden:", 0, 0, 0, 0);
     r_dlsym_call(R_TIMEOUT, "objc_setAssociatedObject",
                  app, assocKey, win, 1, 0, 0, 0, 0);
@@ -911,7 +980,7 @@ static bool perfhud_find_or_create_overlay(void)
     gPerfHUDRAMLabel = ram;
 
     if (statbar_should_log_tick()) {
-        printf("[PERFHUD] installed transparent 3-metric overlay\n");
+        printf("[PERFHUD] installed adaptive root-VC 3-metric overlay\n");
     }
     return true;
 }
@@ -955,10 +1024,6 @@ static bool perfhud_update(double cpu, double gpu, double ram)
     ok &= perfhud_update_label(gPerfHUDCPULabel, 0, "CPU", cpu);
     ok &= perfhud_update_label(gPerfHUDGPULabel, 1, "GPU", gpu);
     ok &= perfhud_update_label(gPerfHUDRAMLabel, 2, "RAM", ram);
-    ok &= perfhud_apply_layout(gPerfHUDWindow,
-                               gPerfHUDCPULabel,
-                               gPerfHUDGPULabel,
-                               gPerfHUDRAMLabel);
     return ok;
 }
 
