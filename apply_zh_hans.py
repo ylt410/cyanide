@@ -49,7 +49,7 @@ def localize_package_catalog(root: Path) -> int:
     descriptions: dict[str, tuple[str, str]] = {
         "PerfHUD": (
             "实时 CPU / GPU / 内存透明悬浮监控",
-            "在 SpringBoard 上显示系统 CPU、GPU 和内存实时占用。性能数据可以高频刷新，而前台横竖屏方向约每 0.75 秒独立检查一次，减少 RemoteCall 对实时刷新的影响。竖屏时自动避开灵动岛，横屏时保持顶部居中；文字采用等宽半粗体和极细的居中深色轮廓，在复杂或浅色背景上更清楚，同时没有底板。各项指标会根据负载独立变色。GPU 数据不可用时会安全显示 GPU --。刷新间隔可在 0.001～5.000 秒之间调整。",
+            "在 SpringBoard 上显示系统 CPU、GPU 和内存实时占用。性能数据可以高频刷新，而前台横竖屏方向约每 0.75 秒独立检查一次，减少 RemoteCall 对实时刷新的影响。竖屏时自动避开灵动岛，横屏时保持顶部居中；文字采用等宽半粗体和极细的居中深色轮廓，在复杂或浅色背景上更清楚，同时没有底板。悬浮层会关闭 UIKit/BackBoard 命中测试，让下面的应用控件仍可点击。各项指标会根据负载独立变色。GPU 数据不可用时会安全显示 GPU --。刷新间隔可在 0.001～5.000 秒之间调整。",
         ),
         "App Switcher Grid": (
             "将多任务切换器改成网格式布局",
@@ -88,8 +88,8 @@ def localize_package_catalog(root: Path) -> int:
             "通过 SpringBoard 定时器保持部分 Face ID 重试和解锁请求处于可用状态。",
         ),
         "Gravity Lite": (
-            "让主屏幕图标加入物理效果",
-            "为主屏幕和 Dock 图标加入重力、碰撞、弹性和加速度计方向等物理效果。",
+            "双摇开启主屏幕重力物理",
+            "启用后保持 Cyanide 后台存活：在主屏幕大力摇晃两次开启图标重力物理；翻到下一页后会自动把物理效果交给新页面，并尽量保持 Dock 的物理状态不断开。再次大力摇晃两次时，图标会先用平滑动画飞回保存的网格位置再清理物理效果。物理状态下的图标仅作为视觉效果，不接管点击。",
         ),
         "Hide Home Bar": (
             "隐藏底部 Home 指示条",
@@ -187,7 +187,7 @@ def localize_package_catalog(root: Path) -> int:
     # PerfHUD custom entry is known and worth localizing even if formatting differs.
     text = text.replace(objc("Live CPU / GPU / RAM overlay"), objc("实时 CPU / GPU / 内存透明悬浮监控"))
     text = text.replace(
-        objc("Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. Metrics can refresh at high cadence while foreground orientation is checked separately about every 0.75 seconds. The HUD stays below the Dynamic Island in portrait, uses no background panel, and renders semibold monospaced digits with a thin centered dark outline for readability over busy scenes. Each metric keeps its own load-based color.\n\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.001 to 5.000 seconds in Settings."),
+        objc("Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. Metrics can refresh at high cadence while foreground orientation is checked separately about every 0.75 seconds. The HUD stays below the Dynamic Island in portrait, uses no background panel, and renders semibold monospaced digits with a thin centered dark outline for readability over busy scenes. The overlay disables window-server hit testing when the runtime API is available, so it does not intentionally consume touches over the foreground app. Each metric keeps its own load-based color.\n\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.001 to 5.000 seconds in Settings."),
         objc("在 SpringBoard 上以透明悬浮窗显示系统 CPU、GPU 和内存占用。性能指标可以高频刷新，而前台横竖屏方向约每 0.75 秒独立检查一次，避免方向检测拖慢实时数据。竖屏时自动避开灵动岛；文字采用等宽半粗体，并加入极细、居中的深色轮廓，在复杂或浅色背景上更容易看清，同时仍然没有底板。各项指标按负载独立变色。\n\nGPU 会优先读取 IOKit PerformanceStatistics；当前设备或系统构建无法提供可用数据时会安全显示 GPU --。刷新间隔可在设置中调整为 0.001～5.000 秒。"),
     )
 
@@ -423,7 +423,7 @@ def main() -> None:
         objc("Refresh rate"): objc("刷新频率"),
         objc("Refresh interval"): objc("刷新间隔"),
         objc("0.001-5.000 seconds. Metrics refresh independently of orientation checks; extremely low values still increase CPU/battery use."): objc("可设置 0.001～5.000 秒。性能数据刷新与横竖屏检测已分离；数值极低时仍会明显增加 CPU 与耗电。"),
-        objc("Transparent CPU / GPU / RAM performance HUD. Metrics can refresh quickly while foreground-orientation checks are throttled to about once every 0.75 seconds, avoiding repeated RemoteCall stalls. Portrait placement stays below the safe area / Dynamic Island; landscape placement stays top-center. Text uses semibold monospaced digits with a thin centered dark outline for readability on busy or light backgrounds, with no background panel or offset text shadow. CPU keeps the last valid sample through brief sub-second tick gaps instead of flashing --. GPU safely shows -- when unavailable. Refresh interval supports 0.001-5.000 seconds; the HUD pauses while the screen is locked or asleep."): objc("透明的 CPU / GPU / 内存性能悬浮窗。性能数据可以高频刷新，而前台方向检测约每 0.75 秒检查一次，避免反复 RemoteCall 卡住刷新。竖屏时自动放在安全区域/灵动岛下方，横屏时保持顶部居中。文字采用等宽半粗体，并加入极细、居中的深色轮廓，在杂乱或浅色背景上更容易看清，同时没有底板，也没有偏移式文字阴影。亚秒级刷新时如果 CPU tick 短暂没有推进，会继续显示上一帧有效 CPU 数值，避免闪成 --。GPU 不可用时安全显示 --。刷新间隔支持 0.001～5.000 秒；锁屏或休眠时悬浮窗会暂停刷新。"),
+        objc("Transparent CPU / GPU / RAM performance HUD. Metrics can refresh quickly while foreground-orientation checks are throttled to about once every 0.75 seconds, avoiding repeated RemoteCall stalls. Portrait placement stays below the safe area / Dynamic Island; landscape placement stays top-center. Text uses semibold monospaced digits with a thin centered dark outline for readability on busy or light backgrounds, with no background panel or offset text shadow. The overlay opts out of UIKit/BackBoard hit-testing so controls underneath remain tappable. CPU keeps the last valid sample through brief sub-second tick gaps instead of flashing --. GPU safely shows -- when unavailable. Refresh interval supports 0.001-5.000 seconds; the HUD pauses while the screen is locked or asleep."): objc("透明的 CPU / GPU / 内存性能悬浮窗。性能数据可以高频刷新，而前台方向检测约每 0.75 秒检查一次，避免反复 RemoteCall 卡住刷新。竖屏时自动放在安全区域/灵动岛下方，横屏时保持顶部居中。文字采用等宽半粗体，并加入极细、居中的深色轮廓，在杂乱或浅色背景上更容易看清，同时没有底板，也没有偏移式文字阴影。悬浮层会退出 UIKit/BackBoard 命中测试，让下面的应用控件继续接收触摸。亚秒级刷新时如果 CPU tick 短暂没有推进，会继续显示上一帧有效 CPU 数值，避免闪成 --。GPU 不可用时安全显示 --。刷新间隔支持 0.001～5.000 秒；锁屏或休眠时悬浮窗会暂停刷新。"),
         objc("Metrics"): objc("指标"),
         objc("Background"): objc("背景"),
         objc("Transparent"): objc("透明"),

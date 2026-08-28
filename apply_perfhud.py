@@ -88,7 +88,7 @@ def main() -> None:
         return @"Live overlay. When enabled, StatBar keeps a SpringBoard RemoteCall session open. Refresh rate applies when Cyanide is minimized but the screen is still awake; StatBar pauses while the screen is locked or asleep.";
     }'''
     new_footer = '''    if (s == SectionStatBar) {
-        return @"Transparent CPU / GPU / RAM performance HUD. Metrics can refresh quickly while foreground-orientation checks are throttled to about once every 0.75 seconds, avoiding repeated RemoteCall stalls. Portrait placement stays below the safe area / Dynamic Island; landscape placement stays top-center. Text uses semibold monospaced digits with a thin centered dark outline for readability on busy or light backgrounds, with no background panel or offset text shadow. CPU keeps the last valid sample through brief sub-second tick gaps instead of flashing --. GPU safely shows -- when unavailable. Refresh interval supports 0.001-5.000 seconds; the HUD pauses while the screen is locked or asleep.";
+        return @"Transparent CPU / GPU / RAM performance HUD. Metrics can refresh quickly while foreground-orientation checks are throttled to about once every 0.75 seconds, avoiding repeated RemoteCall stalls. Portrait placement stays below the safe area / Dynamic Island; landscape placement stays top-center. Text uses semibold monospaced digits with a thin centered dark outline for readability on busy or light backgrounds, with no background panel or offset text shadow. The overlay opts out of UIKit/BackBoard hit-testing so controls underneath remain tappable. CPU keeps the last valid sample through brief sub-second tick gaps instead of flashing --. GPU safely shows -- when unavailable. Refresh interval supports 0.001-5.000 seconds; the HUD pauses while the screen is locked or asleep.";
     }'''
 
     old_refresh_clock = '''static useconds_t settings_statbar_refresh_rate_us(void)
@@ -124,7 +124,7 @@ def main() -> None:
     new_catalog = '''        Package *statBar = [[Package alloc] initWithIdentifier:@"com.darksword.statbar"
                                            name:@"PerfHUD"
                                shortDescription:@"Live CPU / GPU / RAM overlay"
-                                longDescription:@"Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. Metrics can refresh at high cadence while foreground orientation is checked separately about every 0.75 seconds. The HUD stays below the Dynamic Island in portrait, uses no background panel, and renders semibold monospaced digits with a thin centered dark outline for readability over busy scenes. Each metric keeps its own load-based color.\\n\\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.001 to 5.000 seconds in Settings."
+                                longDescription:@"Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. Metrics can refresh at high cadence while foreground orientation is checked separately about every 0.75 seconds. The HUD stays below the Dynamic Island in portrait, uses no background panel, and renders semibold monospaced digits with a thin centered dark outline for readability over busy scenes. The overlay disables window-server hit testing when the runtime API is available, so it does not intentionally consume touches over the foreground app. Each metric keeps its own load-based color.\\n\\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.001 to 5.000 seconds in Settings."
                                         version:version
                                          author:@"zeroxjf / custom PerfHUD fork"
                                        category:@"Performance"
@@ -154,7 +154,7 @@ def main() -> None:
     settings_path.write_text(settings_new, encoding="utf-8")
     catalog_path.write_text(catalog_new, encoding="utf-8")
 
-    print("[PerfHUD] v5 patch applied successfully")
+    print("[PerfHUD] v6 touch-passthrough patch applied successfully")
     print(f"[PerfHUD] backup: {backup}")
     print("[PerfHUD] next: ./scripts/build.sh")
 

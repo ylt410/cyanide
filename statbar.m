@@ -812,6 +812,20 @@ static uint64_t perfhud_font(void)
                            NULL, 0);
 }
 
+static void perfhud_disable_hit_testing(uint64_t view)
+{
+    if (!r_is_objc_ptr(view)) return;
+
+    // A SpringBoard-owned overlay UIWindow can still win BackBoard hit-testing
+    // even when UIKit-level userInteractionEnabled is NO. Ask UIKit/BackBoard
+    // to remove the view from hit-testing entirely when that private category
+    // is present, and keep the public flag as the compatibility fallback.
+    r_msg2_main(view, "setUserInteractionEnabled:", 0, 0, 0, 0);
+    if (r_responds_main(view, "bs_setHitTestingDisabled:")) {
+        r_msg2_main(view, "bs_setHitTestingDisabled:", 1, 0, 0, 0);
+    }
+}
+
 static void perfhud_style_label(uint64_t label)
 {
     if (!r_is_objc_ptr(label)) return;
@@ -837,7 +851,7 @@ static void perfhud_style_label(uint64_t label)
     r_msg2_main(label, "setNumberOfLines:", 1, 0, 0, 0);
     r_msg2_main(label, "setAdjustsFontSizeToFitWidth:", 1, 0, 0, 0);
     r_send_double_main(label, "setMinimumScaleFactor:", 0.78);
-    r_msg2_main(label, "setUserInteractionEnabled:", 0, 0, 0, 0);
+    perfhud_disable_hit_testing(label);
 
     // Thin, centered dark outline. CALayer shadows follow the rendered glyph
     // alpha when shadowPath is nil, so zero offset + a tiny radius reads as a
@@ -939,7 +953,7 @@ static bool perfhud_build_adaptive_content(uint64_t win,
             r_msg2_main(win, "setBackgroundColor:", clear, 0, 0, 0);
         }
     }
-    r_msg2_main(rootView, "setUserInteractionEnabled:", 0, 0, 0, 0);
+    perfhud_disable_hit_testing(rootView);
 
     uint64_t stackAlloc = r_msg2_main(UIStackView, "alloc", 0, 0, 0, 0);
     uint64_t stack = r_is_objc_ptr(stackAlloc)
@@ -953,7 +967,7 @@ static bool perfhud_build_adaptive_content(uint64_t win,
     r_msg2_main(stack, "setAlignment:", 0, 0, 0, 0);     // fill
     r_send_double_main(stack, "setSpacing:", 4.0);
     r_msg2_main(stack, "setTranslatesAutoresizingMaskIntoConstraints:", 1, 0, 0, 0);
-    r_msg2_main(stack, "setUserInteractionEnabled:", 0, 0, 0, 0);
+    perfhud_disable_hit_testing(stack);
 
     uint64_t cpu = perfhud_create_label(kPerfHUDCPUTag);
     uint64_t gpu = perfhud_create_label(kPerfHUDGPUTag);
@@ -977,7 +991,7 @@ static bool perfhud_build_adaptive_content(uint64_t win,
     // Keep a root view controller so the window remains a normal UIKit window;
     // orientation compensation itself is handled explicitly by v4 below.
     r_msg2_main(win, "setRootViewController:", vc, 0, 0, 0);
-    r_msg2_main(win, "setUserInteractionEnabled:", 0, 0, 0, 0);
+    perfhud_disable_hit_testing(win);
     r_send_double_main(win, "setWindowLevel:", kPerfHUDWindowLevel);
 
     if (outCPU) *outCPU = cpu;
@@ -1246,6 +1260,12 @@ static bool perfhud_find_or_create_overlay(void)
             gPerfHUDLastAppliedFrontOrientation = 0;
             gPerfHUDLastAppliedSceneOrientation = 0;
             gPerfHUDLastOrientationPollTime = 0.0;
+            perfhud_disable_hit_testing(cachedWin);
+            perfhud_disable_hit_testing(rootView);
+            perfhud_disable_hit_testing(stack);
+            perfhud_disable_hit_testing(cpu);
+            perfhud_disable_hit_testing(gpu);
+            perfhud_disable_hit_testing(ram);
             r_msg2_main(cachedWin, "setHidden:", 0, 0, 0, 0);
             return true;
         }
@@ -1302,7 +1322,7 @@ static bool perfhud_find_or_create_overlay(void)
     gPerfHUDLastOrientationPollTime = 0.0;
 
     if (statbar_should_log_tick()) {
-        printf("[PERFHUD] installed v5 fast/readable overlay\n");
+        printf("[PERFHUD] installed v6 touch-passthrough fast/readable overlay\n");
     }
     return true;
 }
