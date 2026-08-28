@@ -562,14 +562,15 @@ typedef struct {
     double b;
 } PerfRGB;
 
-static const uint64_t kPerfHUDStackTag = 99600;
+static const uint64_t kPerfHUDStackTag = 99700;
 static const uint64_t kPerfHUDCPUTag = 99501;
 static const uint64_t kPerfHUDGPUTag = 99502;
 static const uint64_t kPerfHUDRAMTag = 99503;
 static const double kPerfHUDHeight = 24.0;
 static const double kPerfHUDWidth = 292.0;
 static const double kPerfHUDFontPt = 12.5;
-static const double kPerfHUDTopInset = 1.0;
+static const double kPerfHUDLandscapeTopInset = 8.0;
+static const double kPerfHUDPortraitGapBelowSafeArea = 4.0;
 static const double kPerfHUDWindowLevel = 999999.0;
 
 static uint64_t gStatBarApplyTick = 0;
@@ -586,8 +587,9 @@ static uint64_t gPerfHUDPerformMainSel = 0;
 static uint64_t gPerfHUDColorCache[5] = {0};
 static uint64_t gPerfHUDInvalidColor = 0;
 static int gPerfHUDLastColorBucket[3] = { -999, -999, -999 };
-static int gPerfHUDLastDeviceOrientation = 1; // UIDeviceOrientationPortrait
-static int gPerfHUDLastAppliedDeviceOrientation = 0;
+static int gPerfHUDLastDeviceOrientation = 1; // UIDeviceOrientationPortrait fallback only
+static int gPerfHUDLastFrontOrientation = 1;  // UIInterfaceOrientationPortrait
+static int gPerfHUDLastAppliedFrontOrientation = 0;
 static int gPerfHUDLastAppliedSceneOrientation = 0;
 
 static bool statbar_should_log_tick(void)
@@ -935,17 +937,17 @@ static bool perfhud_build_adaptive_content(uint64_t win,
     r_msg2_main(stack, "addArrangedSubview:", ram, 0, 0, 0);
     r_msg2_main(rootView, "addSubview:", stack, 0, 0, 0);
 
-    // v3 deliberately does NOT constrain the HUD to SpringBoard's safe area.
+    // v4 deliberately does NOT constrain the HUD to SpringBoard's safe area.
     // SpringBoard's UIWindowScene can stay portrait while the foreground game
     // is landscape. The update loop therefore positions / pre-rotates this
     // stack from the physical device orientation when the scene does not rotate.
     r_send_rect_main(stack, "setBounds:", 0.0, 0.0, kPerfHUDWidth, kPerfHUDHeight);
-    r_send_point_main(stack, "setCenter:", 196.5, kPerfHUDTopInset + kPerfHUDHeight * 0.5);
+    r_send_point_main(stack, "setCenter:", 196.5, 75.0);
     r_send_transform_main(stack, "setTransform:", 0.0);
     r_msg2_main(stack, "layoutIfNeeded", 0, 0, 0, 0);
 
     // Keep a root view controller so the window remains a normal UIKit window;
-    // orientation compensation itself is handled explicitly by v3 below.
+    // orientation compensation itself is handled explicitly by v4 below.
     r_msg2_main(win, "setRootViewController:", vc, 0, 0, 0);
     r_msg2_main(win, "setUserInteractionEnabled:", 0, 0, 0, 0);
     r_send_double_main(win, "setWindowLevel:", kPerfHUDWindowLevel);
@@ -964,19 +966,50 @@ static int perfhud_read_device_orientation_remote(void)
     uint64_t device = r_msg2_main(UIDevice, "currentDevice", 0, 0, 0, 0);
     if (!r_is_objc_ptr(device)) return gPerfHUDLastDeviceOrientation;
 
-    // SpringBoard stays alive, so generating orientation updates here is more
-    // reliable than asking the background Cyanide app which way it is facing.
     r_msg2_main(device, "beginGeneratingDeviceOrientationNotifications", 0, 0, 0, 0);
     uint64_t raw = r_msg2_main(device, "orientation", 0, 0, 0, 0);
     int orientation = (int)raw;
-
-    // 1 portrait, 2 upside-down, 3 landscape-left, 4 landscape-right.
-    // Face-up / face-down / unknown retain the last real orientation so the HUD
-    // does not suddenly spin when the phone is held flat during a game.
     if (orientation >= 1 && orientation <= 4) {
         gPerfHUDLastDeviceOrientation = orientation;
     }
     return gPerfHUDLastDeviceOrientation;
+}
+
+static int perfhud_read_frontmost_orientation_remote(void)
+{
+    uint64_t UIApplication = r_class("UIApplication");
+    if (!r_is_objc_ptr(UIApplication)) return perfhud_read_device_orientation_remote();
+
+    uint64_t app = r_msg2_main(UIApplication, "sharedApplication", 0, 0, 0, 0);
+    if (!r_is_objc_ptr(app)) return perfhud_read_device_orientation_remote();
+
+    // IMPORTANT: UIDevice.orientation inside SpringBoard is not the same thing
+    // as the foreground app's UI orientation. Landscape-only games can be
+    // landscape while SpringBoard/device-orientation reporting remains portrait.
+    // SpringBoard itself exposes the frontmost UI orientation, which is exactly
+    // what an overlay composited above the frontmost app needs.
+    const char *selectors[] = {
+        "_frontMostAppOrientation",
+        "activeInterfaceOrientation",
+        "statusBarOrientation",
+    };
+    for (size_t i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
+        if (!r_responds_main(app, selectors[i])) continue;
+        uint64_t raw = r_msg2_main(app, selectors[i], 0, 0, 0, 0);
+        int orientation = (int)raw;
+        if (orientation >= 1 && orientation <= 4) {
+            gPerfHUDLastFrontOrientation = orientation;
+            return orientation;
+        }
+    }
+
+    // Safe fallback. This is intentionally last because physical orientation is
+    // the value that failed to track landscape-only games in v3.1.
+    int deviceOrientation = perfhud_read_device_orientation_remote();
+    if (deviceOrientation >= 1 && deviceOrientation <= 4) {
+        gPerfHUDLastFrontOrientation = deviceOrientation;
+    }
+    return gPerfHUDLastFrontOrientation;
 }
 
 static int perfhud_read_scene_orientation_remote(uint64_t win)
@@ -984,26 +1017,63 @@ static int perfhud_read_scene_orientation_remote(uint64_t win)
     if (!r_is_objc_ptr(win)) return 0;
     uint64_t scene = r_msg2_main(win, "windowScene", 0, 0, 0, 0);
     if (!r_is_objc_ptr(scene)) return 0;
-    uint64_t sel = r_sel("interfaceOrientation");
-    if (!sel) return 0;
-    uint64_t responds = r_msg2_main(scene, "respondsToSelector:", sel, 0, 0, 0);
-    if (!responds) return 0;
+    if (!r_responds_main(scene, "interfaceOrientation")) return 0;
     uint64_t raw = r_msg2_main(scene, "interfaceOrientation", 0, 0, 0, 0);
     int orientation = (int)raw;
     return (orientation >= 1 && orientation <= 4) ? orientation : 0;
+}
+
+typedef struct {
+    double top;
+    double left;
+    double bottom;
+    double right;
+} RCEdgeInsets64;
+
+static bool perfhud_valid_safe_top(double value)
+{
+    return isfinite(value) && value >= 8.0 && value <= 140.0;
+}
+
+static double perfhud_fallback_safe_top(double shortSide, double longSide)
+{
+    if (longSide >= 852.0 && shortSide >= 390.0) return 59.0;
+    if (longSide >= 844.0 && shortSide >= 390.0) return 47.0;
+    if (longSide >= 812.0 && shortSide >= 375.0) return 44.0;
+    return 20.0;
+}
+
+static double perfhud_read_safe_top_remote(double shortSide, double longSide)
+{
+    uint64_t UIApplication = r_class("UIApplication");
+    if (!r_is_objc_ptr(UIApplication)) return perfhud_fallback_safe_top(shortSide, longSide);
+    uint64_t app = r_msg2_main(UIApplication, "sharedApplication", 0, 0, 0, 0);
+    if (!r_is_objc_ptr(app)) return perfhud_fallback_safe_top(shortSide, longSide);
+
+    uint64_t keyWin = r_msg2_main(app, "keyWindow", 0, 0, 0, 0);
+    if (!r_is_objc_ptr(keyWin)) {
+        uint64_t windows = r_msg2_main(app, "windows", 0, 0, 0, 0);
+        uint64_t count = r_is_objc_ptr(windows) ? r_msg2_main(windows, "count", 0, 0, 0, 0) : 0;
+        if (count > 0 && count < 64) keyWin = r_msg2_main(windows, "objectAtIndex:", 0, 0, 0, 0);
+    }
+    if (!r_is_objc_ptr(keyWin)) return perfhud_fallback_safe_top(shortSide, longSide);
+
+    RCEdgeInsets64 insets = {0};
+    bool ok = r_msg2_main_struct_ret(keyWin, "safeAreaInsets",
+                                     &insets, sizeof(insets),
+                                     NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+    if (ok && perfhud_valid_safe_top(insets.top)) return insets.top;
+    return perfhud_fallback_safe_top(shortSide, longSide);
 }
 
 static bool perfhud_update_orientation_layout(void)
 {
     if (!r_is_objc_ptr(gPerfHUDWindow) || !r_is_objc_ptr(gPerfHUDStack)) return false;
 
-    int deviceOrientation = perfhud_read_device_orientation_remote();
+    int frontOrientation = perfhud_read_frontmost_orientation_remote();
     int sceneOrientation = perfhud_read_scene_orientation_remote(gPerfHUDWindow);
 
-    // Orientation checks happen on every metric tick, but geometry does not need
-    // to be rewritten when nothing changed. At 0.25-0.30s refresh rates this
-    // removes several RemoteCall/main-thread messages from almost every tick.
-    if (deviceOrientation == gPerfHUDLastAppliedDeviceOrientation &&
+    if (frontOrientation == gPerfHUDLastAppliedFrontOrientation &&
         sceneOrientation == gPerfHUDLastAppliedSceneOrientation) {
         return true;
     }
@@ -1016,37 +1086,45 @@ static bool perfhud_update_orientation_layout(void)
         longSide = 852.0;
     }
 
+    double safeTop = perfhud_read_safe_top_remote(shortSide, longSide);
+    double portraitVisualTop = safeTop + kPerfHUDPortraitGapBelowSafeArea;
+    double landscapeVisualTop = kPerfHUDLandscapeTopInset;
+
     double cx = shortSide * 0.5;
-    double cy = kPerfHUDTopInset + kPerfHUDHeight * 0.5;
+    double cy = portraitVisualTop + kPerfHUDHeight * 0.5;
     double angle = 0.0;
 
-    bool deviceLandscape = (deviceOrientation == 3 || deviceOrientation == 4);
+    bool frontLandscape = (frontOrientation == 3 || frontOrientation == 4);
     bool sceneLandscape = (sceneOrientation == 3 || sceneOrientation == 4);
 
-    if (deviceLandscape && sceneLandscape) {
-        // Some builds really do rotate SpringBoard's scene with the frontmost
-        // app. In that case UIKit already did the work; do not double-rotate.
+    if (frontLandscape && sceneLandscape && frontOrientation == sceneOrientation) {
+        // The overlay scene is already following the frontmost application.
         cx = longSide * 0.5;
-        cy = kPerfHUDTopInset + kPerfHUDHeight * 0.5;
+        cy = landscapeVisualTop + kPerfHUDHeight * 0.5;
         angle = 0.0;
-    } else if (deviceOrientation == 3) {
-        // Foreground UI is landscape-left while SpringBoard remains portrait.
-        // Pre-rotate clockwise and park the vertical stack on SpringBoard's
-        // right edge. The compositor's landscape rotation turns it into a
-        // horizontal HUD at the visual top edge.
-        cx = shortSide - (kPerfHUDTopInset + kPerfHUDHeight * 0.5);
+    } else if (frontOrientation == 3) {
+        // UIInterfaceOrientationLandscapeLeft. SpringBoard's portrait overlay is
+        // composited 90 degrees counter-clockwise into the landscape app, so we
+        // pre-rotate clockwise and put it on the portrait right edge. The final
+        // visual result is a horizontal HUD at the landscape top center.
+        cx = shortSide - (landscapeVisualTop + kPerfHUDHeight * 0.5);
         cy = longSide * 0.5;
         angle = M_PI_2;
-    } else if (deviceOrientation == 4) {
-        // Mirror of the landscape-left case.
-        cx = kPerfHUDTopInset + kPerfHUDHeight * 0.5;
+    } else if (frontOrientation == 4) {
+        // UIInterfaceOrientationLandscapeRight, mirrored from the case above.
+        cx = landscapeVisualTop + kPerfHUDHeight * 0.5;
         cy = longSide * 0.5;
         angle = -M_PI_2;
-    } else if (deviceOrientation == 2 && sceneOrientation != 2) {
-        // Portrait upside-down while SpringBoard remains portrait.
+    } else if (frontOrientation == 2 && sceneOrientation != 2) {
         cx = shortSide * 0.5;
-        cy = longSide - (kPerfHUDTopInset + kPerfHUDHeight * 0.5);
+        cy = longSide - (portraitVisualTop + kPerfHUDHeight * 0.5);
         angle = M_PI;
+    } else {
+        // Portrait. Stay below the safe area / Dynamic Island instead of living
+        // at y=1 like v3.1 did.
+        cx = shortSide * 0.5;
+        cy = portraitVisualTop + kPerfHUDHeight * 0.5;
+        angle = 0.0;
     }
 
     r_send_transform_main(gPerfHUDStack, "setTransform:", 0.0);
@@ -1055,8 +1133,13 @@ static bool perfhud_update_orientation_layout(void)
     r_send_transform_main(gPerfHUDStack, "setTransform:", angle);
     r_msg2_main(gPerfHUDStack, "layoutIfNeeded", 0, 0, 0, 0);
 
-    gPerfHUDLastAppliedDeviceOrientation = deviceOrientation;
+    gPerfHUDLastAppliedFrontOrientation = frontOrientation;
     gPerfHUDLastAppliedSceneOrientation = sceneOrientation;
+
+    if (statbar_should_log_tick()) {
+        printf("[PERFHUD] orientation front=%d scene=%d center=(%.1f,%.1f) angle=%.2f safeTop=%.1f\n",
+               frontOrientation, sceneOrientation, cx, cy, angle, safeTop);
+    }
     return true;
 }
 
@@ -1107,13 +1190,13 @@ static bool perfhud_find_or_create_overlay(void)
             gPerfHUDCPULabel = cpu;
             gPerfHUDGPULabel = gpu;
             gPerfHUDRAMLabel = ram;
-            gPerfHUDLastAppliedDeviceOrientation = 0;
+            gPerfHUDLastAppliedFrontOrientation = 0;
             gPerfHUDLastAppliedSceneOrientation = 0;
             r_msg2_main(cachedWin, "setHidden:", 0, 0, 0, 0);
             return true;
         }
 
-        // Deliberately replace older layouts. v3 uses a different stack tag so
+        // Deliberately replace older layouts. v4 uses a different stack tag so
         // an already-running v1/v2 overlay cannot keep the broken landscape
         // geometry after an app update.
         r_msg2_main(cachedWin, "setHidden:", 1, 0, 0, 0);
@@ -1160,11 +1243,11 @@ static bool perfhud_find_or_create_overlay(void)
     gPerfHUDCPULabel = cpu;
     gPerfHUDGPULabel = gpu;
     gPerfHUDRAMLabel = ram;
-    gPerfHUDLastAppliedDeviceOrientation = 0;
+    gPerfHUDLastAppliedFrontOrientation = 0;
     gPerfHUDLastAppliedSceneOrientation = 0;
 
     if (statbar_should_log_tick()) {
-        printf("[PERFHUD] installed v3.1 orientation-aware 3-metric overlay\n");
+        printf("[PERFHUD] installed v4 frontmost-orientation overlay\n");
     }
     return true;
 }
@@ -1247,7 +1330,7 @@ bool statbar_stop_in_session(void)
     gPerfHUDLastColorBucket[0] = -999;
     gPerfHUDLastColorBucket[1] = -999;
     gPerfHUDLastColorBucket[2] = -999;
-    gPerfHUDLastAppliedDeviceOrientation = 0;
+    gPerfHUDLastAppliedFrontOrientation = 0;
     gPerfHUDLastAppliedSceneOrientation = 0;
     gRemoteIOKitLoaded = false;
     printf("[PERFHUD] overlay stopped\n");
@@ -1278,7 +1361,7 @@ void statbar_forget_remote_state(void)
     gPerfHUDSetTextSel = 0;
     gPerfHUDPerformMainSel = 0;
     gPerfHUDLastDeviceOrientation = 1;
-    gPerfHUDLastAppliedDeviceOrientation = 0;
+    gPerfHUDLastAppliedFrontOrientation = 0;
     gPerfHUDLastAppliedSceneOrientation = 0;
     perfhud_forget_color_cache();
 
