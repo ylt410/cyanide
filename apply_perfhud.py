@@ -62,9 +62,9 @@ def main() -> None:
 {
     return @[
         @{ @"kind": @"number", @"key": kSettingsStatBarRefreshRateSec,
-           @"title": @"Refresh interval", @"min": @0.25, @"max": @5.0, @"step": @0.05,
-           @"precision": @2, @"unit": @"s", @"default": @1.0,
-           @"subtitle": @"0.25-5.00 seconds. 0.50s is a good fast default; lower values use more CPU/battery." },
+           @"title": @"Refresh interval", @"min": @0.001, @"max": @5.0, @"step": @0.001,
+           @"precision": @3, @"unit": @"s", @"default": @1.0,
+           @"subtitle": @"0.001-5.000 seconds. Very low values increase CPU/battery use; actual cadence is limited by sampling and RemoteCall overhead." },
     ];
 }'''
 
@@ -78,7 +78,7 @@ def main() -> None:
 
     new_summary = '''        [out addObject:@{@"title": @"Metrics",             @"value": @"CPU / GPU / RAM"}];
         [out addObject:@{@"title": @"Background",          @"value": @"Transparent"}];
-        [out addObject:@{@"title": @"Refresh interval",    @"value": [NSString stringWithFormat:@"%.2fs",
+        [out addObject:@{@"title": @"Refresh interval",    @"value": [NSString stringWithFormat:@"%.3fs",
                                                                        [d doubleForKey:kSettingsStatBarRefreshRateSec]]}];'''
 
     old_bundle_row = '''        @{ @"title": @"StatBar",            @"icon": @"thermometer.medium",                  @"color": [UIColor systemRedColor],    @"section": @(SectionStatBar) },'''
@@ -88,7 +88,7 @@ def main() -> None:
         return @"Live overlay. When enabled, StatBar keeps a SpringBoard RemoteCall session open. Refresh rate applies when Cyanide is minimized but the screen is still awake; StatBar pauses while the screen is locked or asleep.";
     }'''
     new_footer = '''    if (s == SectionStatBar) {
-        return @"Transparent CPU / GPU / RAM performance HUD. The overlay follows the frontmost app's UI orientation, so landscape-only games no longer depend on SpringBoard's physical/device orientation reporting. Portrait placement stays below the safe area / Dynamic Island; landscape placement stays top-center. CPU keeps the last valid sample through brief sub-second tick gaps instead of flashing --. GPU safely shows -- when unavailable. Refresh interval supports 0.25-5.00 seconds; the HUD pauses while the screen is locked or asleep.";
+        return @"Transparent CPU / GPU / RAM performance HUD. The overlay follows the frontmost app's UI orientation, so landscape-only games no longer depend on SpringBoard's physical/device orientation reporting. Portrait placement stays below the safe area / Dynamic Island; landscape placement stays top-center. CPU keeps the last valid sample through brief sub-second tick gaps instead of flashing --. GPU safely shows -- when unavailable. Refresh interval supports 0.001-5.000 seconds; the HUD pauses while the screen is locked or asleep.";
     }'''
 
     old_refresh_clock = '''static useconds_t settings_statbar_refresh_rate_us(void)
@@ -103,7 +103,7 @@ def main() -> None:
 {
     double sec = [[NSUserDefaults standardUserDefaults] doubleForKey:kSettingsStatBarRefreshRateSec];
     if (!isfinite(sec) || sec <= 0.0) sec = (double)kStatBarDefaultRefreshRateSec;
-    if (sec < 0.25) sec = 0.25;
+    if (sec < 0.001) sec = 0.001;
     if (sec > 5.0) sec = 5.0;
     return (useconds_t)llround(sec * 1000000.0);
 }'''
@@ -124,7 +124,7 @@ def main() -> None:
     new_catalog = '''        Package *statBar = [[Package alloc] initWithIdentifier:@"com.darksword.statbar"
                                            name:@"PerfHUD"
                                shortDescription:@"Live CPU / GPU / RAM overlay"
-                                longDescription:@"Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. The HUD follows the frontmost app's UI orientation, stays below the Dynamic Island in portrait, uses no background or text shadow, and colors each metric independently as load rises.\\n\\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.25 to 5.00 seconds in Settings."
+                                longDescription:@"Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. The HUD follows the frontmost app's UI orientation, stays below the Dynamic Island in portrait, uses no background or text shadow, and colors each metric independently as load rises.\\n\\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.001 to 5.000 seconds in Settings."
                                         version:version
                                          author:@"zeroxjf / custom PerfHUD fork"
                                        category:@"Performance"

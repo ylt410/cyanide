@@ -49,7 +49,7 @@ def localize_package_catalog(root: Path) -> int:
     descriptions: dict[str, tuple[str, str]] = {
         "PerfHUD": (
             "实时 CPU / GPU / 内存透明悬浮监控",
-            "在 SpringBoard 上显示系统 CPU、GPU 和内存实时占用。悬浮窗会跟随前台 App 的实际 UI 朝向适配横竖屏，竖屏时自动避开灵动岛，横屏时保持顶部居中；不使用背景或文字阴影，并根据每项负载独立变色。GPU 数据不可用时会安全显示 GPU --。刷新间隔可在 0.25～5.00 秒之间调整。",
+            "在 SpringBoard 上显示系统 CPU、GPU 和内存实时占用。悬浮窗会跟随前台 App 的实际 UI 朝向适配横竖屏，竖屏时自动避开灵动岛，横屏时保持顶部居中；不使用背景或文字阴影，并根据每项负载独立变色。GPU 数据不可用时会安全显示 GPU --。刷新间隔可在 0.001～5.000 秒之间调整。",
         ),
         "App Switcher Grid": (
             "将多任务切换器改成网格式布局",
@@ -187,8 +187,8 @@ def localize_package_catalog(root: Path) -> int:
     # PerfHUD custom entry is known and worth localizing even if formatting differs.
     text = text.replace(objc("Live CPU / GPU / RAM overlay"), objc("实时 CPU / GPU / 内存透明悬浮监控"))
     text = text.replace(
-        objc("Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. The HUD follows the frontmost app's UI orientation, stays below the Dynamic Island in portrait, uses no background or text shadow, and colors each metric independently as load rises.\n\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.25 to 5.00 seconds in Settings."),
-        objc("在 SpringBoard 上以透明悬浮窗显示系统 CPU、GPU 和内存占用。悬浮窗会跟随前台 App 的实际 UI 朝向适配横竖屏，竖屏时自动避开灵动岛，不使用背景或文字阴影，并根据每项负载独立变色。\n\nGPU 会优先读取 IOKit PerformanceStatistics；当前设备或系统构建无法提供可用数据时会安全显示 GPU --。刷新间隔可在设置中调整为 0.25～5.00 秒。"),
+        objc("Shows system-wide CPU, GPU, and RAM utilization in a transparent SpringBoard overlay. The HUD follows the frontmost app's UI orientation, stays below the Dynamic Island in portrait, uses no background or text shadow, and colors each metric independently as load rises.\n\nGPU utilization is read from IOKit PerformanceStatistics when available. Unsupported device/build combinations safely show GPU --. Refresh interval is adjustable from 0.001 to 5.000 seconds in Settings."),
+        objc("在 SpringBoard 上以透明悬浮窗显示系统 CPU、GPU 和内存占用。悬浮窗会跟随前台 App 的实际 UI 朝向适配横竖屏，竖屏时自动避开灵动岛，不使用背景或文字阴影，并根据每项负载独立变色。\n\nGPU 会优先读取 IOKit PerformanceStatistics；当前设备或系统构建无法提供可用数据时会安全显示 GPU --。刷新间隔可在设置中调整为 0.001～5.000 秒。"),
     )
 
     if text != original:
@@ -422,8 +422,8 @@ def main() -> None:
         objc("Enable Tweak"): objc("启用插件"),
         objc("Refresh rate"): objc("刷新频率"),
         objc("Refresh interval"): objc("刷新间隔"),
-        objc("0.25-5.00 seconds. 0.50s is a good fast default; lower values use more CPU/battery."): objc("可设置 0.25～5.00 秒。想要更实时建议用 0.50 秒；数值越低，CPU 与耗电开销越高。"),
-        objc("Transparent CPU / GPU / RAM performance HUD. The overlay follows the frontmost app's UI orientation, so landscape-only games no longer depend on SpringBoard's physical/device orientation reporting. Portrait placement stays below the safe area / Dynamic Island; landscape placement stays top-center. CPU keeps the last valid sample through brief sub-second tick gaps instead of flashing --. GPU safely shows -- when unavailable. Refresh interval supports 0.25-5.00 seconds; the HUD pauses while the screen is locked or asleep."): objc("透明的 CPU / GPU / 内存性能悬浮窗。横竖屏会跟随前台 App 的实际 UI 朝向，竖屏时自动放到安全区域下方以避开灵动岛，横屏时保持顶部居中，并且不使用文字阴影。亚秒级刷新时如果 CPU tick 短暂没有推进，会继续显示上一帧有效 CPU 数值，避免闪成 --。GPU 不可用时安全显示 --。刷新间隔支持 0.25～5.00 秒；锁屏或休眠时悬浮窗会暂停刷新。"),
+        objc("0.001-5.000 seconds. Very low values increase CPU/battery use; actual cadence is limited by sampling and RemoteCall overhead."): objc("可设置 0.001～5.000 秒。数值非常低时会明显增加 CPU 与耗电，实际刷新速度仍会受采样与 RemoteCall 开销限制。"),
+        objc("Transparent CPU / GPU / RAM performance HUD. The overlay follows the frontmost app's UI orientation, so landscape-only games no longer depend on SpringBoard's physical/device orientation reporting. Portrait placement stays below the safe area / Dynamic Island; landscape placement stays top-center. CPU keeps the last valid sample through brief sub-second tick gaps instead of flashing --. GPU safely shows -- when unavailable. Refresh interval supports 0.001-5.000 seconds; the HUD pauses while the screen is locked or asleep."): objc("透明的 CPU / GPU / 内存性能悬浮窗。横竖屏会跟随前台 App 的实际 UI 朝向，竖屏时自动放到安全区域下方以避开灵动岛，横屏时保持顶部居中，并且不使用文字阴影。亚秒级刷新时如果 CPU tick 短暂没有推进，会继续显示上一帧有效 CPU 数值，避免闪成 --。GPU 不可用时安全显示 --。刷新间隔支持 0.001～5.000 秒；锁屏或休眠时悬浮窗会暂停刷新。"),
         objc("Metrics"): objc("指标"),
         objc("Background"): objc("背景"),
         objc("Transparent"): objc("透明"),
