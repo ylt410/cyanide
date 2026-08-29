@@ -56,9 +56,13 @@ def patch_gravity_core(root: Path):
         '// Returns the currently selected Home Screen icon-list object as a session-\n'
         '// scoped token. It is never dereferenced by the app.\n'
         'uint64_t gravitylite_current_page_token_in_session(void);\n'
+        '// Hide/show only the active Home Screen physics overlay. This is used while\n'
+        '// SpringBoard is paging so physics icons cannot visually ride into the next page.\n'
+        'bool gravitylite_set_home_group_visible_in_session(bool visible);\n'
         '// While Gravity Mode is active, restore only the old home-page group and move\n'
-        '// physics to the newly selected page. A Dock group is kept alive.\n'
-        'bool gravitylite_handoff_current_page_in_session(GravityLiteConfig config);\n'
+        '// physics to a page that has remained stable long enough to be safe. The\n'
+        '// expected token prevents a fast second swipe from retargeting mid-transaction.\n'
+        'bool gravitylite_handoff_current_page_in_session(GravityLiteConfig config, uint64_t expectedPageToken);\n'
         'bool gravitylite_explosion_in_session(double force);',
         'gravitylite.h page/restore API')
 
@@ -474,7 +478,40 @@ bool gravitylite_stop_in_session(void)
     return token;
 }
 
-bool gravitylite_handoff_current_page_in_session(GravityLiteConfig config)
+bool gravitylite_set_home_group_visible_in_session(bool visible)
+{
+    uint32_t oldSettle = r_settle_us(0);
+    bool ok = false;
+
+    uint64_t ctrl = gl_icon_controller();
+    uint64_t state = r_is_objc_ptr(ctrl) ? gl_get_state(ctrl) : 0;
+    if (!r_is_objc_ptr(ctrl) || !r_is_objc_ptr(state)) goto visible_done;
+
+    uint64_t groups = gl_dict_get(state, "groups");
+    if (!r_is_objc_ptr(groups)) goto visible_done;
+
+    uint64_t mgr = gl_icon_manager(ctrl);
+    uint64_t dockListView = gl_dock_list_view(ctrl, mgr);
+    uint64_t count = gl_array_count(groups);
+    if (count > 64) count = 64;
+    for (uint64_t i = 0; i < count; i++) {
+        uint64_t group = gl_array_object(groups, i);
+        uint64_t listView = gl_dict_get(group, "listView");
+        if (r_is_objc_ptr(dockListView) && listView == dockListView) continue;
+        uint64_t overlay = gl_dict_get(group, "overlay");
+        if (!r_is_objc_ptr(overlay)) overlay = gl_dict_get(group, "referenceView");
+        if (r_is_objc_ptr(overlay)) {
+            gl_set_double(overlay, "setAlpha:", visible ? 1.0 : 0.0);
+            ok = true;
+        }
+    }
+
+visible_done:
+    r_settle_us(oldSettle);
+    return ok;
+}
+
+bool gravitylite_handoff_current_page_in_session(GravityLiteConfig config, uint64_t expectedPageToken)
 {
     uint32_t oldSettle = r_settle_us(0);
     bool ok = false;
@@ -498,6 +535,27 @@ bool gravitylite_handoff_current_page_in_session(GravityLiteConfig config)
         : gl_find_home_icon_list_view(ctrl, mgr, iconViewCls, false);
     if (!r_is_objc_ptr(desiredPage)) desiredPage = gl_current_root_list_view(ctrl, mgr);
     if (!r_is_objc_ptr(desiredPage)) goto done;
+    if (expectedPageToken != 0 && desiredPage != expectedPageToken) {
+        printf("[GRAVITY] handoff cancelled before restore: expected=0x%llx current=0x%llx\n",
+               (unsigned long long)expectedPageToken,
+               (unsigned long long)desiredPage);
+        goto done;
+    }
+
+    // One final pre-mutation stability check. If another swipe begins during
+    // this short guard, leave the existing physics group completely untouched.
+    usleep(80000);
+    desiredPage = useLiveIconPath
+        ? gl_current_root_list_view_ios26_legacy(ctrl)
+        : gl_find_home_icon_list_view(ctrl, mgr, iconViewCls, false);
+    if (!r_is_objc_ptr(desiredPage)) desiredPage = gl_current_root_list_view(ctrl, mgr);
+    if (!r_is_objc_ptr(desiredPage)) goto done;
+    if (expectedPageToken != 0 && desiredPage != expectedPageToken) {
+        printf("[GRAVITY] handoff cancelled by pre-mutation guard: expected=0x%llx current=0x%llx\n",
+               (unsigned long long)expectedPageToken,
+               (unsigned long long)desiredPage);
+        goto done;
+    }
 
     uint64_t count = gl_array_count(groups);
     if (count > 64) count = 64;
@@ -521,14 +579,9 @@ bool gravitylite_handoff_current_page_in_session(GravityLiteConfig config)
     }
 
     gl_rebuild_gravity_ptr_cache(groups);
-    usleep(180000);
-
-    desiredPage = useLiveIconPath
-        ? gl_current_root_list_view_ios26_legacy(ctrl)
-        : gl_find_home_icon_list_view(ctrl, mgr, iconViewCls, false);
-    if (!r_is_objc_ptr(desiredPage)) desiredPage = gl_current_root_list_view(ctrl, mgr);
-    if (!r_is_objc_ptr(desiredPage)) goto done;
-
+    // No sleep after restoring the old page. Once mutation starts, rebuild the
+    // already-validated target immediately so there is no long half-restored
+    // window for a second swipe to collide with.
     ok = gl_build_group(groups, desiredPage, iconViewCls, config, false, useLiveIconPath);
     if (ok) {
         printf("[GRAVITY] Physics handed to current home page 0x%llx; Dock preserved=%d.\n",
@@ -559,7 +612,7 @@ def main() -> None:
 
     # Idempotence: do not stack the patch if the workflow is re-run on an already patched tree.
     if "settings_gravity_submit_tilt_async" in text and "Double-shake detector armed" in text and "gravitylite_handoff_current_page_in_session" in (root / "Cyanide" / "tweaks" / "gravitylite.m").read_text(encoding="utf-8"):
-        print("[GRAVITY-SHAKE] v3.2 already applied")
+        print("[GRAVITY-SHAKE] v3.3 already applied")
         return
 
     # Older v1/v2 Settings-only patch must not be stacked onto itself.
@@ -591,11 +644,14 @@ static volatile int g_gravity_shake_waiting_for_release = 0;
 // group, keeps the Dock group alive, then captures the newly visible page.
 static volatile uint64_t g_gravity_page_probe_after_us = 0;
 static volatile uint64_t g_gravity_page_token = 0;
+static volatile uint64_t g_gravity_page_candidate_token = 0;
+static volatile uint64_t g_gravity_page_candidate_since_us = 0;
+static volatile int g_gravity_page_visuals_suspended = 0;
 static volatile int g_gravity_page_handoff_running = 0;
 // Never block the CoreMotion callback on a SpringBoard RemoteCall. While
 // physics is active we submit at most one tilt update worker at a time and
-// throttle it to ~12.5 Hz, leaving the 25 Hz sensor feed free to detect the
-// second double-shake reliably.
+// throttle it to ~10 Hz, leaving room for the page-stability probe and the
+// 25 Hz sensor feed without building a RemoteCall backlog.
 static volatile int g_gravity_tilt_update_running = 0;
 static volatile uint64_t g_gravity_tilt_next_submit_us = 0;'''
     text = replace_once(text, old_globals, new_globals, "gravity global state")
@@ -643,6 +699,9 @@ static void settings_gravity_reset_page_tracking(void)
 {
     __sync_lock_test_and_set(&g_gravity_page_probe_after_us, 0);
     __sync_lock_test_and_set(&g_gravity_page_token, 0);
+    __sync_lock_test_and_set(&g_gravity_page_candidate_token, 0);
+    __sync_lock_test_and_set(&g_gravity_page_candidate_since_us, 0);
+    __sync_lock_test_and_set(&g_gravity_page_visuals_suspended, 0);
     __sync_lock_test_and_set(&g_gravity_page_handoff_running, 0);
 }
 
@@ -694,7 +753,7 @@ static void settings_gravity_submit_tilt_async(double angle,
 
     uint64_t now = settings_gravity_sensor_now_us();
     if (now == 0 || now < g_gravity_tilt_next_submit_us) return;
-    __sync_lock_test_and_set(&g_gravity_tilt_next_submit_us, now + 80000ULL);
+    __sync_lock_test_and_set(&g_gravity_tilt_next_submit_us, now + 100000ULL);
 
     // If the previous RemoteCall is still in flight, drop this tilt sample.
     // Fresh sensor samples are more valuable than building a stale backlog.
@@ -736,7 +795,10 @@ static void settings_gravity_maybe_handoff_page_async(void)
 
     uint64_t now = settings_gravity_sensor_now_us();
     if (now == 0 || now < g_gravity_page_probe_after_us) return;
-    __sync_lock_test_and_set(&g_gravity_page_probe_after_us, now + 250000ULL);
+    // 10 Hz is fast enough to make the old overlay disappear almost
+    // immediately after a page-token change, but slow enough to avoid
+    // competing with tilt updates for the RemoteCall lock.
+    __sync_lock_test_and_set(&g_gravity_page_probe_after_us, now + 100000ULL);
     if (__sync_lock_test_and_set(&g_gravity_page_handoff_running, 1)) return;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -753,36 +815,88 @@ static void settings_gravity_maybe_handoff_page_async(void)
                 }
 
                 uint32_t oldSettle = r_settle_us(0);
+                uint64_t sampleNow = settings_gravity_sensor_now_us();
                 uint64_t token = gravitylite_current_page_token_in_session();
                 uint64_t active = g_gravity_page_token;
-                if (token != 0 && active == 0) {
-                    // A previous handoff may have restored the outgoing page
-                    // but hit the new page while SpringBoard was still laying
-                    // it out. Ask the core to (re)attach the current page; it
-                    // is a no-op if that page already owns a physics group.
-                    GravityLiteConfig config = settings_gravitylite_config_from_defaults(d);
-                    bool ok = gravitylite_handoff_current_page_in_session(config);
-                    uint64_t current = ok ? gravitylite_current_page_token_in_session() : 0;
-                    if (ok && current != 0) {
-                        __sync_lock_test_and_set(&g_gravity_page_token, current);
+
+                if (token == 0) {
+                    // During some SpringBoard transition frames there is no
+                    // usable current list. Never mutate icon hierarchy here.
+                    r_settle_us(oldSettle);
+                    return;
+                }
+
+                if (active != 0 && token == active) {
+                    // Swipe cancelled or bounced back to the page that already
+                    // owns physics. Reveal its overlay again and forget the
+                    // transient candidate.
+                    if (g_gravity_page_visuals_suspended != 0) {
+                        (void)gravitylite_set_home_group_visible_in_session(true);
+                        __sync_lock_test_and_set(&g_gravity_page_visuals_suspended, 0);
                     }
-                } else if (token != 0 && active != 0 && token != active) {
-                    GravityLiteConfig config = settings_gravitylite_config_from_defaults(d);
-                    printf("[GRAVITY] home page changed 0x%llx -> 0x%llx; handing physics to new page\n",
-                           (unsigned long long)active,
-                           (unsigned long long)token);
-                    bool ok = gravitylite_handoff_current_page_in_session(config);
-                    uint64_t current = ok ? gravitylite_current_page_token_in_session() : 0;
-                    if (ok && current != 0) {
-                        __sync_lock_test_and_set(&g_gravity_page_token, current);
-                        printf("[GRAVITY] page handoff complete token=0x%llx\n",
-                               (unsigned long long)current);
-                    } else {
-                        // Leave physics mode armed. A later probe can retry after
-                        // SpringBoard finishes its paging animation/layout pass.
+                    __sync_lock_test_and_set(&g_gravity_page_candidate_token, 0);
+                    __sync_lock_test_and_set(&g_gravity_page_candidate_since_us, 0);
+                    r_settle_us(oldSettle);
+                    return;
+                }
+
+                uint64_t candidate = g_gravity_page_candidate_token;
+                if (candidate != token) {
+                    // First observation of a different page, or a rapid fling
+                    // moved through another page. Hide only the old physics
+                    // overlay. Do NOT reparent/restore SBIconViews while
+                    // SpringBoard's paging animation is still in flight.
+                    __sync_lock_test_and_set(&g_gravity_page_candidate_token, token);
+                    __sync_lock_test_and_set(&g_gravity_page_candidate_since_us, sampleNow);
+                    if (active != 0 && g_gravity_page_visuals_suspended == 0) {
+                        (void)gravitylite_set_home_group_visible_in_session(false);
+                        __sync_lock_test_and_set(&g_gravity_page_visuals_suspended, 1);
+                    }
+                    r_settle_us(oldSettle);
+                    return;
+                }
+
+                uint64_t since = g_gravity_page_candidate_since_us;
+                // A page must remain unchanged for 700 ms before we touch the
+                // icon hierarchy. Fast multi-page swipes therefore produce no
+                // intermediate restores/builds at all. This is the important
+                // SpringBoard-crash fix, not merely a cosmetic debounce.
+                if (since == 0 || sampleNow < since || sampleNow - since < 700000ULL) {
+                    r_settle_us(oldSettle);
+                    return;
+                }
+
+                GravityLiteConfig config = settings_gravitylite_config_from_defaults(d);
+                printf("[GRAVITY] stable page candidate 0x%llx for %.3fs; handing off\n",
+                       (unsigned long long)token,
+                       (double)(sampleNow - since) / 1000000.0);
+                bool ok = gravitylite_handoff_current_page_in_session(config, token);
+                uint64_t current = ok ? gravitylite_current_page_token_in_session() : 0;
+                if (ok && current == token) {
+                    // A cancelled earlier handoff may have left the existing
+                    // page's overlay transparent. Re-enable visibility even if
+                    // the core discovered that this page already owned a group.
+                    (void)gravitylite_set_home_group_visible_in_session(true);
+                    __sync_lock_test_and_set(&g_gravity_page_token, current);
+                    __sync_lock_test_and_set(&g_gravity_page_candidate_token, 0);
+                    __sync_lock_test_and_set(&g_gravity_page_candidate_since_us, 0);
+                    __sync_lock_test_and_set(&g_gravity_page_visuals_suspended, 0);
+                    printf("[GRAVITY] safe page handoff complete token=0x%llx\n",
+                           (unsigned long long)current);
+                } else {
+                    // The page changed again during the guarded transaction, or
+                    // the new list was not ready. The core refuses to retarget
+                    // in that case. Do not immediately retry; require a fresh
+                    // stable candidate window.
+                    uint64_t latest = gravitylite_current_page_token_in_session();
+                    __sync_lock_test_and_set(&g_gravity_page_candidate_token, latest);
+                    __sync_lock_test_and_set(&g_gravity_page_candidate_since_us,
+                                             settings_gravity_sensor_now_us());
+                    if (active != 0) {
                         __sync_lock_test_and_set(&g_gravity_page_token, 0);
-                        printf("[GRAVITY] page handoff deferred; will retry\n");
                     }
+                    printf("[GRAVITY] page handoff deferred after movement; latest=0x%llx\n",
+                           (unsigned long long)latest);
                 }
                 r_settle_us(oldSettle);
             }
@@ -829,7 +943,7 @@ static void settings_gravity_toggle_physics_from_shake_async(void)
                         __sync_lock_test_and_set(&g_gravity_page_token,
                                                  gravitylite_current_page_token_in_session());
                         __sync_lock_test_and_set(&g_gravity_page_probe_after_us,
-                                                 settings_gravity_sensor_now_us() + 250000ULL);
+                                                 settings_gravity_sensor_now_us() + 100000ULL);
                         settings_mark_tweak_applied(kSettingsGravityLiteEnabled, YES);
                     }
                 } else {
@@ -1143,7 +1257,7 @@ static void settings_stop_gravity_motion(void)
     path.write_text(text, encoding="utf-8")
     gravity_path.write_text(gravity_text, encoding="utf-8")
     header_path.write_text(header_text, encoding="utf-8")
-    print("[GRAVITY-SHAKE] v3.2 nonblocking shake-off + page-handoff + animated-restore patched SettingsViewController.m + gravitylite core")
+    print("[GRAVITY-SHAKE] v3.3 stable-page handoff + swipe-safe overlay suspension + animated-restore patched SettingsViewController.m + gravitylite core")
     print("[GRAVITY-SHAKE] keep-alive audio is reused from Cyanide's existing DSKeepAlive; no new audio session is added")
 
 
