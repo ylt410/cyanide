@@ -59,8 +59,10 @@ def patch_gravity_core(root: Path):
         '// Hide/show only the active Home Screen physics overlay. This is used while\n'
         '// SpringBoard is paging so physics icons cannot visually ride into the next page.\n'
         'bool gravitylite_set_home_group_visible_in_session(bool visible);\n'
-        '// While Gravity Mode is active, restore only the old home-page group and move\n'
-        '// physics to a page that has remained stable long enough to be safe. The\n'
+        '// Detects page motion before SpringBoard changes its current-page token by\n'
+        '// comparing the active icon-list position against its captured window frame.\n'
+        'bool gravitylite_home_group_is_displaced_in_session(double threshold);\n'
+        '// While Gravity Mode is active, restore only the old home-page group and move\n'         '// physics to a page that has remained stable long enough to be safe. The\n'
         '// expected token prevents a fast second swipe from retargeting mid-transaction.\n'
         'bool gravitylite_handoff_current_page_in_session(GravityLiteConfig config, uint64_t expectedPageToken);\n'
         'bool gravitylite_explosion_in_session(double force);',
@@ -85,7 +87,7 @@ def patch_gravity_core(root: Path):
         '}\n',
         'gravity array removal helper')
 
-    # iOS 17/26 live-icon path: remember each icon's original overlay frame.
+    # iOS 17/26 source path is converted below into snapshot-only physics.
     g = replace_once(
         g,
         '    uint64_t liveItems = gl_new_remote("NSMutableArray");\n'
@@ -189,6 +191,213 @@ def patch_gravity_core(root: Path):
         'static bool gl_build_group(uint64_t groups,',
         'live builder success release')
 
+    # iOS 17/26 MUST NOT reparent real SBIconViews into the window overlay.
+    # SpringBoard scroll/layout still owns those views while paging; keeping live
+    # icon views inside our independent physics overlay caused both visual carry-
+    # over and rapid-swipe SpringBoard restarts. Replace that whole builder with
+    # snapshot-only physics. The real icon list stays in its native hierarchy and
+    # is only alpha-swapped with the physics overlay.
+    ios17_26_snapshot_builder = r'''static bool gl_build_group_ios26_per_icon(uint64_t groups,
+                                          uint64_t listView,
+                                          uint64_t iconViewCls,
+                                          GravityLiteConfig config,
+                                          bool isDock)
+{
+    enum { ICON_CAP = 256 };
+    uint64_t iconViews[ICON_CAP] = {0};
+    int iconCount = sb_collect_views(listView, iconViewCls, iconViews, ICON_CAP);
+    if (iconCount <= 0) return false;
+
+    uint64_t icons = gl_new_remote("NSMutableArray");
+    uint64_t liveItems = gl_new_remote("NSMutableArray");
+    uint64_t liveParents = gl_new_remote("NSMutableArray");
+    uint64_t liveFrames = gl_new_remote("NSMutableArray");
+    uint64_t targetFrames = gl_new_remote("NSMutableArray");
+    GL_CGRect overlayFrame = {0};
+    uint64_t overlay = gl_overlay_for_list_view_ios26_legacy(listView, &overlayFrame);
+    if (!r_is_objc_ptr(icons) ||
+        !r_is_objc_ptr(liveItems) ||
+        !r_is_objc_ptr(liveParents) ||
+        !r_is_objc_ptr(liveFrames) ||
+        !r_is_objc_ptr(targetFrames) ||
+        !r_is_objc_ptr(overlay)) {
+        if (r_is_objc_ptr(overlay)) {
+            r_msg2_main(overlay, "removeFromSuperview", 0, 0, 0, 0);
+            gl_release(overlay);
+        }
+        gl_release(icons);
+        if (liveItems) gl_release(liveItems);
+        if (liveParents) gl_release(liveParents);
+        if (liveFrames) gl_release(liveFrames);
+        if (targetFrames) gl_release(targetFrames);
+        return false;
+    }
+
+    GL_CGRect overlayBounds = {0.0, 0.0, overlayFrame.w, overlayFrame.h};
+    int added = 0;
+    uint32_t oldSettle = r_settle_us(0);
+    for (int i = 0; i < iconCount; i++) {
+        uint64_t icon = iconViews[i];
+        if (!r_is_objc_ptr(icon) || gl_view_is_hidden(icon)) continue;
+
+        GL_CGRect iconBounds;
+        GL_CGRect iconInOverlay;
+        if (!gl_get_rect(icon, "bounds", &iconBounds) ||
+            !gl_rect_valid(iconBounds) ||
+            !gl_convert_rect_to_view(icon, iconBounds, overlay, &iconInOverlay) ||
+            !gl_rect_valid(iconInOverlay) ||
+            !gl_rect_overlaps_bounds(iconInOverlay, overlayBounds)) {
+            continue;
+        }
+
+        uint64_t snapshot = gl_snapshot_for_icon_ios26_legacy(icon, overlay);
+        if (!r_is_objc_ptr(snapshot)) continue;
+
+        GL_CGRect snapshotFrame;
+        if (!gl_get_rect(snapshot, "frame", &snapshotFrame) ||
+            !gl_rect_valid(snapshotFrame)) {
+            continue;
+        }
+        uint64_t targetFrameValue = gl_value_with_rect(snapshotFrame);
+        if (!r_is_objc_ptr(targetFrameValue)) continue;
+
+        r_msg2_main(overlay, "addSubview:", snapshot, 0, 0, 0);
+        gl_array_add(icons, snapshot);
+        gl_array_add(targetFrames, targetFrameValue);
+        added++;
+    }
+    r_settle_us(oldSettle);
+
+    if (added <= 0) {
+        printf("[GRAVITY] No visible icons found for snapshot-safe group.\n");
+        r_msg2_main(overlay, "removeFromSuperview", 0, 0, 0, 0);
+        gl_release(overlay);
+        gl_release(icons);
+        gl_release(liveItems);
+        gl_release(liveParents);
+        gl_release(liveFrames);
+        gl_release(targetFrames);
+        return false;
+    }
+
+    // Only snapshots become physics items. The real list remains attached to
+    // SpringBoard so interactive paging/layout can proceed normally.
+    gl_set_double(listView, "setAlpha:", 0.0);
+
+    uint64_t animator = gl_animator_for_reference_view(overlay);
+    if (!r_is_objc_ptr(animator)) {
+        gl_set_double(listView, "setAlpha:", 1.0);
+        r_msg2_main(overlay, "removeFromSuperview", 0, 0, 0, 0);
+        gl_release(overlay);
+        gl_release(icons);
+        gl_release(liveItems);
+        gl_release(liveParents);
+        gl_release(liveFrames);
+        gl_release(targetFrames);
+        return false;
+    }
+
+    uint64_t collision = gl_alloc_init_with_items("UICollisionBehavior", icons);
+    if (r_is_objc_ptr(collision)) {
+        gl_set_bool(collision, "setTranslatesReferenceBoundsIntoBoundary:", true);
+        r_msg2_main(animator, "addBehavior:", collision, 0, 0, 0);
+        gl_release(collision);
+    }
+
+    uint64_t itemBehavior = gl_alloc_init_with_items("UIDynamicItemBehavior", icons);
+    if (r_is_objc_ptr(itemBehavior)) {
+        gl_set_double(itemBehavior, "setElasticity:", 0.3);
+        gl_set_double(itemBehavior, "setFriction:", 0.2);
+        gl_set_double(itemBehavior, "setDensity:", 1.0);
+        gl_set_double(itemBehavior, "setResistance:", 0.0);
+        gl_set_double(itemBehavior, "setAngularResistance:", 0.0);
+        gl_set_bool(itemBehavior, "setAllowsRotation:", config.allowsRotation);
+        r_msg2_main(animator, "addBehavior:", itemBehavior, 0, 0, 0);
+        gl_release(itemBehavior);
+    }
+
+    uint64_t gravity = gl_alloc_init_with_items("UIGravityBehavior", icons);
+    if (r_is_objc_ptr(gravity)) {
+        gl_set_double(gravity, "setAngle:", M_PI_2);
+        gl_set_double(gravity, "setMagnitude:", 3.0);
+        r_msg2_main(animator, "addBehavior:", gravity, 0, 0, 0);
+        int n = __atomic_load_n(&s_gravity_ptr_count, __ATOMIC_RELAXED);
+        if (n < 8) {
+            s_gravity_ptrs[n] = gravity;
+            __atomic_store_n(&s_gravity_ptr_count, n + 1, __ATOMIC_SEQ_CST);
+        }
+        gl_release(gravity);
+    }
+
+    uint64_t listWindowFrameValue = 0;
+    uint64_t window = gl_view_window(listView);
+    GL_CGRect listBounds;
+    GL_CGRect listInWindow;
+    if (r_is_objc_ptr(window) &&
+        gl_get_rect(listView, "bounds", &listBounds) &&
+        gl_rect_valid(listBounds) &&
+        gl_convert_rect_to_view(listView, listBounds, window, &listInWindow) &&
+        gl_rect_valid(listInWindow)) {
+        listWindowFrameValue = gl_value_with_rect(listInWindow);
+    }
+
+    uint64_t group = gl_new_remote("NSMutableDictionary");
+    if (r_is_objc_ptr(group)) {
+        gl_dict_set(group, "animator", animator);
+        gl_dict_set(group, "icons", icons);
+        gl_dict_set(group, "snapshots", icons);
+        gl_dict_set(group, "liveItems", liveItems);
+        gl_dict_set(group, "liveParents", liveParents);
+        gl_dict_set(group, "liveFrames", liveFrames);
+        gl_dict_set(group, "targetFrames", targetFrames);
+        gl_dict_set(group, "gravity", gravity);
+        gl_dict_set(group, "listView", listView);
+        gl_dict_set(group, "referenceView", overlay);
+        gl_dict_set(group, "overlay", overlay);
+        if (r_is_objc_ptr(listWindowFrameValue)) {
+            gl_dict_set(group, "listWindowFrame", listWindowFrameValue);
+        }
+        gl_array_add(groups, group);
+        gl_release(group);
+    } else {
+        gl_set_double(listView, "setAlpha:", 1.0);
+        r_msg2_main(overlay, "removeFromSuperview", 0, 0, 0, 0);
+        gl_release(animator);
+        gl_release(overlay);
+        gl_release(icons);
+        gl_release(liveItems);
+        gl_release(liveParents);
+        gl_release(liveFrames);
+        gl_release(targetFrames);
+        return false;
+    }
+
+    uint64_t isRunning = gl_safe_msg(animator, "isRunning", 0, 0, 0, 0);
+    uint64_t behaviorCount = gl_array_count(gl_safe_msg(animator, "behaviors", 0, 0, 0, 0));
+    printf("[GRAVITY] Captured %s: %d snapshot item(s) (%.0f×%.0f pt), physics=%s behaviors=%llu\n",
+           isDock ? "dock" : "home screen",
+           added,
+           overlayFrame.w, overlayFrame.h,
+           isRunning ? "running" : "starting",
+           (unsigned long long)behaviorCount);
+
+    gl_release(animator);
+    gl_release(overlay);
+    gl_release(icons);
+    gl_release(liveItems);
+    gl_release(liveParents);
+    gl_release(liveFrames);
+    gl_release(targetFrames);
+    return true;
+}
+'''
+    g = replace_region(
+        g,
+        'static bool gl_build_group_ios26_per_icon(uint64_t groups,',
+        'static bool gl_build_group(uint64_t groups,',
+        ios17_26_snapshot_builder,
+        'iOS17/26 snapshot-only group builder')
+
     # Legacy/snapshot path. Save an unscaled grid target parallel to snapshots.
     g = replace_once(
         g,
@@ -246,6 +455,91 @@ def patch_gravity_core(root: Path):
         '        gl_array_add(targetFrames, targetFrameValue);\n'
         '        added++;',
         'snapshot save target frame')
+
+    # Legacy path also used to reparent widget-sized live views. That has the
+    # same ownership race during paging, so make every Home/Dock dynamic item a
+    # snapshot here too. preferRectSnapshot helps larger widget surfaces.
+    g = replace_once(
+        g,
+        '        bool widgetSizedItem = !isDock &&\n'
+        '                               (iconInOverlay.w >= 88.0 || iconInOverlay.h >= 88.0);\n'
+        '        if (!widgetSizedItem) {\n'
+        '            iconInOverlay = gl_rect_scale_about_center(iconInOverlay, kGravityLiteSnapshotScale);\n'
+        '        }\n'
+        '        uint64_t physicsItem = 0;\n'
+        '        if (widgetSizedItem) {\n'
+        '            uint64_t parent = gl_safe_msg(icon, "superview", 0, 0, 0, 0);\n'
+        '            GL_CGRect originalFrame;\n'
+        '            if (!r_is_objc_ptr(parent) || !gl_get_rect(icon, "frame", &originalFrame)) continue;\n'
+        '            uint64_t frameValue = gl_value_with_rect(originalFrame);\n'
+        '            if (!r_is_objc_ptr(frameValue)) continue;\n\n'
+        '            gl_array_add(liveItems, icon);\n'
+        '            gl_array_add(liveParents, parent);\n'
+        '            gl_array_add(liveFrames, frameValue);\n'
+        '            r_msg2_main(overlay, "addSubview:", icon, 0, 0, 0);\n'
+        '            gl_set_rect(icon, "setFrame:", iconInOverlay);\n'
+        '            physicsItem = icon;\n'
+        '        } else {\n'
+        '            uint64_t snapshot = gl_snapshot_for_view(icon,\n'
+        '                                                     iconBounds,\n'
+        '                                                     iconInOverlay,\n'
+        '                                                     false,\n'
+        '                                                     false);\n'
+        '            if (!r_is_objc_ptr(snapshot)) continue;\n'
+        '            r_msg2_main(overlay, "addSubview:", snapshot, 0, 0, 0);\n'
+        '            physicsItem = snapshot;\n'
+        '        }',
+        '        bool widgetSizedItem = !isDock &&\n'
+        '                               (iconInOverlay.w >= 88.0 || iconInOverlay.h >= 88.0);\n'
+        '        if (!widgetSizedItem) {\n'
+        '            iconInOverlay = gl_rect_scale_about_center(iconInOverlay, kGravityLiteSnapshotScale);\n'
+        '        }\n'
+        '        uint64_t snapshot = gl_snapshot_for_view(icon,\n'
+        '                                                 iconBounds,\n'
+        '                                                 iconInOverlay,\n'
+        '                                                 false,\n'
+        '                                                 widgetSizedItem);\n'
+        '        if (!r_is_objc_ptr(snapshot)) continue;\n'
+        '        r_msg2_main(overlay, "addSubview:", snapshot, 0, 0, 0);\n'
+        '        uint64_t physicsItem = snapshot;',
+        'legacy snapshot-only widget branch')
+
+    # Store the legacy list's initial window-space frame too, so swipe motion is
+    # detected before SpringBoard flips the selected page token on every OS path.
+    g = replace_once(
+        g,
+        '    uint64_t group = gl_new_remote("NSMutableDictionary");\n'
+        '    if (r_is_objc_ptr(group)) {\n'
+        '        gl_dict_set(group, "animator", animator);\n'
+        '        gl_dict_set(group, "snapshots", snapshots);',
+        '    uint64_t listWindowFrameValue = 0;\n'
+        '    uint64_t listWindow = gl_view_window(listView);\n'
+        '    GL_CGRect listBoundsForPaging;\n'
+        '    GL_CGRect listInWindowForPaging;\n'
+        '    if (r_is_objc_ptr(listWindow) &&\n'
+        '        gl_get_rect(listView, "bounds", &listBoundsForPaging) &&\n'
+        '        gl_rect_valid(listBoundsForPaging) &&\n'
+        '        gl_convert_rect_to_view(listView, listBoundsForPaging, listWindow, &listInWindowForPaging) &&\n'
+        '        gl_rect_valid(listInWindowForPaging)) {\n'
+        '        listWindowFrameValue = gl_value_with_rect(listInWindowForPaging);\n'
+        '    }\n\n'
+        '    uint64_t group = gl_new_remote("NSMutableDictionary");\n'
+        '    if (r_is_objc_ptr(group)) {\n'
+        '        gl_dict_set(group, "animator", animator);\n'
+        '        gl_dict_set(group, "snapshots", snapshots);',
+        'legacy list window baseline')
+    g = replace_once(
+        g,
+        '        gl_dict_set(group, "listView", listView);\n'
+        '        gl_dict_set(group, "overlay", overlay);\n'
+        '        gl_array_add(groups, group);',
+        '        gl_dict_set(group, "listView", listView);\n'
+        '        gl_dict_set(group, "overlay", overlay);\n'
+        '        if (r_is_objc_ptr(listWindowFrameValue)) {\n'
+        '            gl_dict_set(group, "listWindowFrame", listWindowFrameValue);\n'
+        '        }\n'
+        '        gl_array_add(groups, group);',
+        'legacy group stores page baseline')
 
     cleanup_pairs = [
         (
@@ -500,15 +794,73 @@ bool gravitylite_set_home_group_visible_in_session(bool visible)
         if (r_is_objc_ptr(dockListView) && listView == dockListView) continue;
         uint64_t overlay = gl_dict_get(group, "overlay");
         if (!r_is_objc_ptr(overlay)) overlay = gl_dict_get(group, "referenceView");
-        if (r_is_objc_ptr(overlay)) {
-            gl_set_double(overlay, "setAlpha:", visible ? 1.0 : 0.0);
-            ok = true;
+
+        if (visible) {
+            if (r_is_objc_ptr(listView)) gl_set_double(listView, "setAlpha:", 0.0);
+            if (r_is_objc_ptr(overlay)) gl_set_double(overlay, "setAlpha:", 1.0);
+        } else {
+            if (r_is_objc_ptr(overlay)) gl_set_double(overlay, "setAlpha:", 0.0);
+            if (r_is_objc_ptr(listView)) gl_set_double(listView, "setAlpha:", 1.0);
         }
+        if (r_is_objc_ptr(overlay) || r_is_objc_ptr(listView)) ok = true;
     }
 
 visible_done:
     r_settle_us(oldSettle);
     return ok;
+}
+
+bool gravitylite_home_group_is_displaced_in_session(double threshold)
+{
+    if (!isfinite(threshold) || threshold < 0.5) threshold = 0.5;
+    uint32_t oldSettle = r_settle_us(0);
+    bool displaced = false;
+
+    uint64_t ctrl = gl_icon_controller();
+    uint64_t state = r_is_objc_ptr(ctrl) ? gl_get_state(ctrl) : 0;
+    if (!r_is_objc_ptr(ctrl) || !r_is_objc_ptr(state)) goto displaced_done;
+    uint64_t groups = gl_dict_get(state, "groups");
+    if (!r_is_objc_ptr(groups)) goto displaced_done;
+
+    uint64_t mgr = gl_icon_manager(ctrl);
+    uint64_t dockListView = gl_dock_list_view(ctrl, mgr);
+    uint64_t count = gl_array_count(groups);
+    if (count > 64) count = 64;
+    for (uint64_t i = 0; i < count; i++) {
+        uint64_t group = gl_array_object(groups, i);
+        uint64_t listView = gl_dict_get(group, "listView");
+        if (!r_is_objc_ptr(listView)) continue;
+        if (r_is_objc_ptr(dockListView) && listView == dockListView) continue;
+
+        uint64_t baselineValue = gl_dict_get(group, "listWindowFrame");
+        GL_CGRect baseline;
+        if (!r_is_objc_ptr(baselineValue) ||
+            !gl_rect_from_value(baselineValue, &baseline) ||
+            !gl_rect_valid(baseline)) {
+            continue;
+        }
+
+        uint64_t window = gl_view_window(listView);
+        GL_CGRect bounds;
+        GL_CGRect current;
+        if (!r_is_objc_ptr(window) ||
+            !gl_get_rect(listView, "bounds", &bounds) ||
+            !gl_rect_valid(bounds) ||
+            !gl_convert_rect_to_view(listView, bounds, window, &current) ||
+            !gl_rect_valid(current)) {
+            continue;
+        }
+
+        if (fabs(current.x - baseline.x) > threshold ||
+            fabs(current.y - baseline.y) > threshold) {
+            displaced = true;
+            break;
+        }
+    }
+
+displaced_done:
+    r_settle_us(oldSettle);
+    return displaced;
 }
 
 bool gravitylite_handoff_current_page_in_session(GravityLiteConfig config, uint64_t expectedPageToken)
@@ -612,7 +964,7 @@ def main() -> None:
 
     # Idempotence: do not stack the patch if the workflow is re-run on an already patched tree.
     if "settings_gravity_submit_tilt_async" in text and "Double-shake detector armed" in text and "gravitylite_handoff_current_page_in_session" in (root / "Cyanide" / "tweaks" / "gravitylite.m").read_text(encoding="utf-8"):
-        print("[GRAVITY-SHAKE] v3.3 already applied")
+        print("[GRAVITY-SHAKE] v4 already applied")
         return
 
     # Older v1/v2 Settings-only patch must not be stacked onto itself.
@@ -639,9 +991,9 @@ static volatile uint64_t g_gravity_shake_first_pulse_us = 0;
 static volatile uint64_t g_gravity_shake_last_pulse_us = 0;
 static volatile uint64_t g_gravity_shake_cooldown_until_us = 0;
 static volatile int g_gravity_shake_waiting_for_release = 0;
-// While physics is active, poll the current SpringBoard icon page at a much
-// lower cadence than CoreMotion. Page handoff restores only the old home-page
-// group, keeps the Dock group alive, then captures the newly visible page.
+// While physics is active, poll the current SpringBoard icon page separately
+// from CoreMotion. Home physics is snapshot-only: the real icon list never
+// leaves SpringBoard and is swapped back in immediately when paging moves.
 static volatile uint64_t g_gravity_page_probe_after_us = 0;
 static volatile uint64_t g_gravity_page_token = 0;
 static volatile uint64_t g_gravity_page_candidate_token = 0;
@@ -795,10 +1147,10 @@ static void settings_gravity_maybe_handoff_page_async(void)
 
     uint64_t now = settings_gravity_sensor_now_us();
     if (now == 0 || now < g_gravity_page_probe_after_us) return;
-    // 10 Hz is fast enough to make the old overlay disappear almost
-    // immediately after a page-token change, but slow enough to avoid
-    // competing with tilt updates for the RemoteCall lock.
-    __sync_lock_test_and_set(&g_gravity_page_probe_after_us, now + 100000ULL);
+    // 20 Hz catches icon-list displacement near the first visible paging
+    // frame, before SpringBoard changes the current-page token. Snapshot-only
+    // physics makes this safe because no real SBIconView is being reparented.
+    __sync_lock_test_and_set(&g_gravity_page_probe_after_us, now + 50000ULL);
     if (__sync_lock_test_and_set(&g_gravity_page_handoff_running, 1)) return;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -826,16 +1178,24 @@ static void settings_gravity_maybe_handoff_page_async(void)
                     return;
                 }
 
+                bool displaced = gravitylite_home_group_is_displaced_in_session(2.0);
                 if (active != 0 && token == active) {
-                    // Swipe cancelled or bounced back to the page that already
-                    // owns physics. Reveal its overlay again and forget the
-                    // transient candidate.
-                    if (g_gravity_page_visuals_suspended != 0) {
-                        (void)gravitylite_set_home_group_visible_in_session(true);
-                        __sync_lock_test_and_set(&g_gravity_page_visuals_suspended, 0);
+                    // currentRootIconListView does not flip at swipe start.
+                    // Window-space displacement does, so swap back to native
+                    // SpringBoard icons before the physics overlay can linger.
+                    if (displaced) {
+                        if (g_gravity_page_visuals_suspended == 0) {
+                            (void)gravitylite_set_home_group_visible_in_session(false);
+                            __sync_lock_test_and_set(&g_gravity_page_visuals_suspended, 1);
+                        }
+                    } else {
+                        if (g_gravity_page_visuals_suspended != 0) {
+                            (void)gravitylite_set_home_group_visible_in_session(true);
+                            __sync_lock_test_and_set(&g_gravity_page_visuals_suspended, 0);
+                        }
+                        __sync_lock_test_and_set(&g_gravity_page_candidate_token, 0);
+                        __sync_lock_test_and_set(&g_gravity_page_candidate_since_us, 0);
                     }
-                    __sync_lock_test_and_set(&g_gravity_page_candidate_token, 0);
-                    __sync_lock_test_and_set(&g_gravity_page_candidate_since_us, 0);
                     r_settle_us(oldSettle);
                     return;
                 }
@@ -1241,7 +1601,7 @@ static void settings_stop_gravity_motion(void)
 
     # Update the in-app help text so it no longer claims automatic shake is absent.
     old_help = '''Not included in this core port: Activator/Home-button hooks, drag gestures, automatic shake effects, and preference-daemon notifications.'''
-    new_help = '''Shake gesture: while Gravity Lite is enabled and Cyanide remains alive in the background, two deliberate hard shakes start icon physics. While physics is active, swiping to another Home Screen page automatically restores the previous page and hands physics to the newly visible page while preserving Dock physics. Two more hard shakes animate icons smoothly back to their saved grid positions before cleanup. Physical icons remain intentionally non-interactive; Activator/Home-button hooks, drag gestures, and preference-daemon notifications are still not included.'''
+    new_help = '''Shake gesture: while Gravity Lite is enabled and Cyanide remains alive in the background, two deliberate hard shakes start icon physics. Home Screen physics uses snapshots so real SBIconViews remain owned by SpringBoard; when paging begins, native icons immediately replace the physics overlay, and after the destination page settles physics is rebuilt there while preserving Dock physics. Two more hard shakes animate icons smoothly back to their saved grid positions before cleanup. Physical icons remain intentionally non-interactive; Activator/Home-button hooks, drag gestures, and preference-daemon notifications are still not included.'''
     if old_help in text:
         text = text.replace(old_help, new_help, 1)
 
@@ -1257,7 +1617,7 @@ static void settings_stop_gravity_motion(void)
     path.write_text(text, encoding="utf-8")
     gravity_path.write_text(gravity_text, encoding="utf-8")
     header_path.write_text(header_text, encoding="utf-8")
-    print("[GRAVITY-SHAKE] v3.3 stable-page handoff + swipe-safe overlay suspension + animated-restore patched SettingsViewController.m + gravitylite core")
+    print("[GRAVITY-SHAKE] v4 snapshot-safe paging + displacement detection + animated-restore patched SettingsViewController.m + gravitylite core")
     print("[GRAVITY-SHAKE] keep-alive audio is reused from Cyanide's existing DSKeepAlive; no new audio session is added")
 
 
