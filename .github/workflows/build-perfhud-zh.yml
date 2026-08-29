@@ -33,6 +33,9 @@ jobs:
       - name: Apply Gravity double-shake patch
         run: python3 apply_gravity_shake.py .
 
+      - name: Apply Siri-style Notification Island patch
+        run: python3 apply_notification_island_siri.py .
+
       - name: Apply Simplified Chinese patch
         run: python3 apply_zh_hans.py .
 
