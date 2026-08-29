@@ -53,6 +53,46 @@ def patch_settings_ui(root: Path) -> None:
     print(f'[NISLAND] enabled Notification Island package UI -> {target}')
 
 
+
+def patch_package_catalog(root: Path) -> None:
+    target = root / 'Cyanide' / 'installer' / 'PackageCatalog.m'
+    if not target.exists():
+        raise SystemExit(f'[NISLAND] missing package catalog: {target}')
+    text = target.read_text(encoding='utf-8')
+
+    old_block = '''        Package *notificationIsland = [[Package alloc] initWithIdentifier:@"com.darksword.notificationisland"
+                                           name:@"Notification Island"
+                               shortDescription:@"Mirror incoming banners into the Dynamic Island"
+                                longDescription:@"Experimental Dynamic Island notification route. Watches SpringBoard's active banner request over the shared RemoteCall session, then mirrors the title/body into Cyanide's ActivityKit Live Activity.\\n\\nNo extra configuration."
+                                        version:version
+                                         author:@"zeroxjf"
+                                       category:@"In Development"
+                                     symbolName:@"bell.and.waves.left.and.right.fill"
+                                           kind:PackageInstallKindToggle
+                                     enabledKey:kSettingsNotificationIslandEnabled
+                                          isNew:NO];
+        notificationIsland.settingsSection = kSecNotificationIsland;
+        notificationIsland.installDisabledReason = inDevelopmentDisabledReason;
+        notificationIsland.unstableWarning = @"⚠️ In development only — install is disabled because this does not work yet. Polls SpringBoard notification state over RemoteCall and may miss banners, duplicate activity updates, or destabilize SpringBoard.";'''
+
+    new_block = '''        Package *notificationIsland = [[Package alloc] initWithIdentifier:@"com.darksword.notificationisland"
+                                           name:@"Notification Island"
+                               shortDescription:@"Siri-style portrait notification overlay"
+                                longDescription:@"Shows incoming portrait banners as a Siri-style Notification Island: the Dynamic Island area stays black while the notification content below is transparent. Swipe up to dismiss the presentation. Landscape leaves the native system banner untouched.\\n\\nUses the existing SpringBoard RemoteCall notification watcher and does not require ActivityKit for presentation."
+                                        version:version
+                                         author:@"zeroxjf"
+                                       category:@"SpringBoard"
+                                     symbolName:@"bell.and.waves.left.and.right.fill"
+                                           kind:PackageInstallKindToggle
+                                     enabledKey:kSettingsNotificationIslandEnabled
+                                          isNew:NO];
+        notificationIsland.settingsSection = kSecNotificationIsland;
+        notificationIsland.unstableWarning = @"⚠️ Experimental: polls SpringBoard notification state over RemoteCall. It may still miss very short banners or temporarily destabilize SpringBoard on unsupported builds; landscape intentionally keeps the native banner.";'''
+
+    text = _replace_once(text, old_block, new_block, 'unlock installer package catalog')
+    target.write_text(text, encoding='utf-8')
+    print(f'[NISLAND] enabled Notification Island installer package -> {target}')
+
 def patch_zh_metadata(root: Path) -> None:
     # The Chinese patch runs after this patch in the mobile workflow. Update its
     # package metadata now so it does not re-introduce the old unfinished /\n    # install-disabled wording after we unlock the feature.
@@ -83,6 +123,7 @@ def main():
     target.write_text(SOURCE, encoding='utf-8')
     print(f'[NISLAND] installed Siri-style Notification Island -> {target}')
     patch_settings_ui(root)
+    patch_package_catalog(root)
     patch_zh_metadata(root)
 
 if __name__ == '__main__':
