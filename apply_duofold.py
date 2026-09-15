@@ -9,17 +9,26 @@ def fail(msg: str) -> None:
     raise SystemExit(f"[DUOFOLD] {msg}")
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
-    count = text.count(old)
-    if count == 0:
-        fail(f"anchor not found: {label}")
-    if count > 1:
-        fail(f"anchor not unique ({count} matches): {label}")
-    return text.replace(old, new, 1)
+    # Basic detection only: use the first matching anchor.
+    pos = text.find(old)
+    if pos < 0:
+        fail(f"basic anchor missing: {label}")
+    return text[:pos] + new + text[pos + len(old):]
 
 def patch_if_missing(text: str, marker: str, old: str, new: str, label: str) -> str:
     if marker in text:
         return text
     return replace_once(text, old, new, label)
+
+def patch_if_missing_any(text: str, marker: str, anchors, prefix: str, label: str) -> str:
+    if marker in text:
+        return text
+    for anchor in anchors:
+        pos = text.find(anchor)
+        if pos >= 0:
+            return text[:pos] + prefix + anchor + text[pos + len(anchor):]
+    fail(f"basic anchor missing: {label}")
+
 
 def main() -> None:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
@@ -41,8 +50,8 @@ def main() -> None:
     text = patch_if_missing(
         text,
         '#import "tweaks/duofold.h"',
-        '#import "tweaks/gravitylite.h"\n#import "tweaks/appswitchergrid.h"',
-        '#import "tweaks/gravitylite.h"\n#import "tweaks/duofold.h"\n#import "tweaks/appswitchergrid.h"',
+        '#import "tweaks/gravitylite.h"\n',
+        '#import "tweaks/gravitylite.h"\n#import "tweaks/duofold.h"\n',
         "Duo Fold import",
     )
 
@@ -220,28 +229,17 @@ static bool settings_stop_themer_registered''',
         "Duo Fold enabled log",
     )
 
-    text = patch_if_missing(
-        text,
-        'settings_progress(&step, total, "Starting Duo Fold motion effect")',
+    gravity_run_anchors = [
         '''                    if (runGravityLite) {
                         settings_progress(&step, total, "Starting Gravity Lite icon physics");''',
-        '''                    if (runDuoFold) {
-                        settings_progress(&step, total, "Starting Duo Fold motion effect");
-                        (void)duofold_stop_in_session();
-                        settings_start_duofold_motion();
-                        bool ok = duofold_motion_running();
-                        settings_mark_tweak_applied(kSettingsDuoFoldEnabled,
-                                                    ok && [d boolForKey:kSettingsDuoFoldEnabled]);
-                        printf("[SETTINGS] Duo Fold result=%d\n", ok);
-                        log_user("%s Duo Fold %s.\n",
-                                 ok ? "[OK]" : "[WARN]",
-                                 ok ? "motion tracking armed — tilt after leaving Cyanide"
-                                    : "could not start Core Motion");
-                        cyanide_upload_log_milestone(ok ? @"duofold-armed" : @"duofold-failed");
-                    }
-
-                    if (runGravityLite) {
-                        settings_progress(&step, total, "Starting Gravity Lite icon physics");''',
+        '''                    if (runGravityLite) {
+                        settings_progress(&step, total, "Arming Gravity Lite double-shake physics");''',
+    ]
+    text = patch_if_missing_any(
+        text,
+        'settings_progress(&step, total, "Starting Duo Fold motion effect")',
+        gravity_run_anchors,
+        '                    if (runDuoFold) {\n                        settings_progress(&step, total, "Starting Duo Fold motion effect");\n                        (void)duofold_stop_in_session();\n                        settings_start_duofold_motion();\n                        bool ok = duofold_motion_running();\n                        settings_mark_tweak_applied(kSettingsDuoFoldEnabled,\n                                                    ok && [d boolForKey:kSettingsDuoFoldEnabled]);\n                        printf("[SETTINGS] Duo Fold result=%d\\n", ok);\n                        log_user("%s Duo Fold %s.\\n",\n                                 ok ? "[OK]" : "[WARN]",\n                                 ok ? "motion tracking armed — tilt after leaving Cyanide"\n                                    : "could not start Core Motion");\n                        cyanide_upload_log_milestone(ok ? @"duofold-armed" : @"duofold-failed");\n                    }\n\n',
         "Duo Fold run block",
     )
 
@@ -282,6 +280,18 @@ static bool settings_stop_themer_registered''',
     }''',
         "Duo Fold settings summary",
     )
+
+    required = (
+        '#import "tweaks/duofold.h"',
+        'kSettingsDuoFoldEnabled',
+        'settings_start_duofold_motion',
+        'BOOL runDuoFold =',
+        'Starting Duo Fold motion effect',
+        '@"title": @"Duo Fold animation"',
+    )
+    missing = [marker for marker in required if marker not in text]
+    if missing:
+        fail("patch incomplete: " + ", ".join(missing))
 
     settings.write_text(text, encoding="utf-8")
     print("[DUOFOLD] Applied successfully.")
