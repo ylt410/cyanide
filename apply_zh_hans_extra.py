@@ -87,6 +87,8 @@ def main() -> None:
         objc("Home columns"): objc("主屏幕列数"),
         objc("Home rows"): objc("主屏幕行数"),
         objc("Hide icon labels"): objc("隐藏图标名称"),
+        objc("After Apply, return to the Home Screen and shake the phone twice to start Gravity physics. Shake twice again to restore the icons. Cyanide automatically keeps its existing background runtime alive while the gesture is armed. Activator/Home-button hooks, drag gestures, and preference-daemon notifications are not included."):
+            objc("应用后返回主屏幕，连续摇动手机两次即可启动 Gravity 物理效果；再次摇动两次会恢复图标。手势待命期间 Cyanide 会自动启动现有的后台保活。此版本不包含 Activator/Home 键钩子、拖拽手势和偏好守护进程通知。"),
 
         objc(
             "RemoteCall-only core port of Julio Verne's Gravity. Run applies UIDynamicAnimator gravity, collision, bounce, friction, optional dock physics, and accelerometer steering to SpringBoard icon snapshots. It can restore the icon layout or fire a manual explosion pulse while the SpringBoard session is active.\n\nNot included in this core port: Activator/Home-button hooks, drag gestures, automatic shake effects, and preference-daemon notifications."
@@ -103,6 +105,15 @@ def main() -> None:
         ): objc(
             "使用 iPhone 的运动传感器作为虚拟铰链，驱动 SpringBoard 折叠视觉效果。开启后应用待处理插件，将 Cyanide 切到后台，再倾斜手机即可。建议开启后台保活，以持续提供运动数据。"
         ),
+    })
+
+    total += patch_file(root, "Cyanide/installer/PackageCatalog.m", {
+        objc("Motion-driven fold effect for SpringBoard"):
+            objc("随手机姿态变化的 SpringBoard 折叠动效"),
+        objc("Uses the iPhone motion sensors as a virtual hinge to drive a fold-style SpringBoard visual effect. Apply it here, return to the Home Screen, keep Cyanide in the background, then tilt the phone left or right. Cyanide automatically starts its existing background keep-alive while Duo Fold is active. No separate Settings switch or extra Run step is required."):
+            objc("使用 iPhone 的运动传感器作为虚拟铰链，驱动 SpringBoard 的折叠视觉效果。直接在这里应用，然后返回主屏幕并让 Cyanide 保持在后台，左右倾斜手机即可看到效果。Duo Fold 启用期间会自动启动 Cyanide 现有的后台保活，不需要再去设置里找开关，也不需要额外执行 Run。"),
+        objc("Experimental visual effect: it depends on a live Cyanide RemoteCall session and Core Motion updates. Locking the device, killing Cyanide from the App Switcher, or a SpringBoard restart stops the live effect."):
+            objc("实验性视觉效果：依赖 Cyanide 持续的 RemoteCall 会话和运动传感器更新。锁屏、从多任务界面杀掉 Cyanide，或 SpringBoard 重启后，实时效果都会停止。"),
     })
 
     total += patch_file(root, "Cyanide/Base.lproj/Main.storyboard", {

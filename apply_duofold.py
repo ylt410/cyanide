@@ -33,8 +33,10 @@ def patch_if_missing_any(text: str, marker: str, anchors, prefix: str, label: st
 def main() -> None:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
     settings = root / "Cyanide" / "SettingsViewController.m"
+    settings_h = root / "Cyanide" / "SettingsViewController.h"
+    package_catalog = root / "Cyanide" / "installer" / "PackageCatalog.m"
     tweaks = root / "Cyanide" / "tweaks"
-    if not settings.exists() or not tweaks.is_dir():
+    if not settings.exists() or not settings_h.exists() or not package_catalog.exists() or not tweaks.is_dir():
         fail("run this from the Cyanide repository root (or pass the repo path)")
 
     # The Xcode project uses a filesystem-synchronized Cyanide group, so these
@@ -60,7 +62,7 @@ def main() -> None:
         'kSettingsDuoFoldEnabled = @"DuoFoldEnabled"',
         'NSString * const kSettingsGravityLiteAngularResistancePct = @"GravityLiteAngularResistancePct";\n\nNSString * const kSettingsStageStripEnabled',
         'NSString * const kSettingsGravityLiteAngularResistancePct = @"GravityLiteAngularResistancePct";\n'
-        'static NSString * const kSettingsDuoFoldEnabled = @"DuoFoldEnabled";\n\n'
+        'NSString * const kSettingsDuoFoldEnabled = @"DuoFoldEnabled";\n\n'
         'NSString * const kSettingsStageStripEnabled',
         "Duo Fold defaults key",
     )
@@ -92,6 +94,9 @@ static void settings_start_duofold_motion(void)
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (![d boolForKey:kSettingsDuoFoldEnabled]) return;
 
+    // Duo Fold is app-driven while Cyanide is in the background. Reuse the
+    // existing keep-alive audio so Core Motion keeps delivering samples.
+    ds_keepalive_apply_enabled(YES);
     duofold_motion_recalibrate();
     duofold_motion_start(^(double angleRadians) {
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -234,6 +239,8 @@ static bool settings_stop_themer_registered''',
                         settings_progress(&step, total, "Starting Gravity Lite icon physics");''',
         '''                    if (runGravityLite) {
                         settings_progress(&step, total, "Arming Gravity Lite double-shake physics");''',
+        '''                    if (runGravityLite) {
+                        settings_progress(&step, total, "Arming Gravity Lite double-shake");''',
     ]
     text = patch_if_missing_any(
         text,
@@ -254,95 +261,53 @@ static bool settings_stop_themer_registered''',
         "Duo Fold background live-loop requirement",
     )
 
-    # Remove stale nested Duo Fold rows from older patch versions.
-    # Best-effort only: if those fragments are absent, keep going.
-    stale_nested_blocks = [
-        """        @{ @"kind": @"toggle",
-           @"key": kSettingsDuoFoldEnabled,
-           @"title": @"Duo Fold animation",
-           @"subtitle": @"Uses iPhone motion as a virtual hinge; Keep Alive is recommended." },
-""",
-        """        @{ @"kind": @"toggle",
-           @"key": kSettingsDuoFoldEnabled,
-           @"title": @"Duo Fold animation",
-           @"subtitle": @"Motion-driven fold effect. Keep Alive is recommended." },
-""",
-    ]
-    for stale in stale_nested_blocks:
-        text = text.replace(stale, "")
-
-    # Dedicated top-level Settings card and detail page. Duo Fold is a sibling of
-    # Gravity Lite, never a row inside Gravity Lite.
-    text = patch_if_missing(
-        text,
-        'SectionDuoFold,',
-        '    SectionGravityLite,\n    SectionAppSwitcherGrid,',
-        '    SectionGravityLite,\n    SectionDuoFold,\n    SectionAppSwitcherGrid,',
-        "Duo Fold settings section enum",
+    # Duo Fold is a real installer package, not a hidden Settings bundle.
+    # SettingsViewController contains only the runtime backend.
+    header_text = settings_h.read_text(encoding="utf-8")
+    header_text = patch_if_missing(
+        header_text,
+        "extern NSString * const kSettingsDuoFoldEnabled;",
+        "extern NSString * const kSettingsGravityLiteEnabled;\n",
+        "extern NSString * const kSettingsGravityLiteEnabled;\n"
+        "extern NSString * const kSettingsDuoFoldEnabled;\n",
+        "Duo Fold exported settings key",
     )
+    settings_h.write_text(header_text, encoding="utf-8")
 
-    text = patch_if_missing(
-        text,
-        '- (NSArray<NSDictionary *> *)duoFoldRows',
-        '- (NSArray<NSDictionary *> *)gravityLiteRows\n{',
-        '''- (NSArray<NSDictionary *> *)duoFoldRows
-{
-    return @[
-        @{ @"kind": @"toggle",
-           @"key": kSettingsDuoFoldEnabled,
-           @"title": @"Enable Duo Fold",
-           @"subtitle": @"Motion-driven fold effect. Keep Alive is recommended." },
-    ];
-}
-
-- (NSArray<NSDictionary *> *)gravityLiteRows
-{''',
-        "Duo Fold standalone rows",
+    catalog_text = package_catalog.read_text(encoding="utf-8")
+    duo_package_block = r'''        Package *duoFold = [[Package alloc] initWithIdentifier:@"com.darksword.duofold"
+                                           name:@"Duo Fold"
+                               shortDescription:@"Motion-driven fold effect for SpringBoard"
+                                longDescription:@"Uses the iPhone motion sensors as a virtual hinge to drive a fold-style SpringBoard visual effect. Apply it here, return to the Home Screen, keep Cyanide in the background, then tilt the phone left or right. Cyanide automatically starts its existing background keep-alive while Duo Fold is active. No separate Settings switch or extra Run step is required."
+                                        version:version
+                                         author:@"Elijah Semyonov / zeroxjf"
+                                       category:@"Home Screen"
+                                     symbolName:@"iphone"
+                                           kind:PackageInstallKindToggle
+                                     enabledKey:kSettingsDuoFoldEnabled
+                                          isNew:YES];
+        duoFold.unstableWarning = @"Experimental visual effect: it depends on a live Cyanide RemoteCall session and Core Motion updates. Locking the device, killing Cyanide from the App Switcher, or a SpringBoard restart stops the live effect.";
+'''
+    catalog_text = patch_if_missing(
+        catalog_text,
+        'Package *duoFold = [[Package alloc] initWithIdentifier:@"com.darksword.duofold"',
+        '        Package *appSwitcherGrid = [[Package alloc] initWithIdentifier:@"com.darksword.appswitchergrid"',
+        duo_package_block + '\n        Package *appSwitcherGrid = [[Package alloc] initWithIdentifier:@"com.darksword.appswitchergrid"',
+        "Duo Fold package definition",
     )
-
-    text = patch_if_missing(
-        text,
-        'case SectionDuoFold: return self.duoFoldRows;',
-        '        case SectionGravityLite: return self.gravityLiteRows;\n',
-        '        case SectionGravityLite: return self.gravityLiteRows;\n'
-        '        case SectionDuoFold: return self.duoFoldRows;\n',
-        "Duo Fold rowsForSection case",
+    catalog_text = patch_if_missing(
+        catalog_text,
+        "            duoFold,\n",
+        "            gravityLite,\n            powercuff,\n",
+        "            gravityLite,\n            duoFold,\n            powercuff,\n",
+        "Duo Fold package list entry",
     )
-
-    text = patch_if_missing(
-        text,
-        '@"section": @(SectionDuoFold)',
-        '        @{ @"title": @"Gravity Lite",       @"icon": @"arrow.down.circle.fill",              @"color": [UIColor systemGreenColor],  @"section": @(SectionGravityLite) },\n',
-        '        @{ @"title": @"Gravity Lite",       @"icon": @"arrow.down.circle.fill",              @"color": [UIColor systemGreenColor],  @"section": @(SectionGravityLite) },\n'
-        '        @{ @"title": @"Duo Fold",          @"icon": @"iphone",                              @"color": [UIColor systemIndigoColor], @"section": @(SectionDuoFold) },\n',
-        "Duo Fold top-level settings card",
-    )
-
-    text = patch_if_missing(
-        text,
-        'section == SectionDuoFold',
-        '    } else if (section == SectionLocationSim) {',
-        '''    } else if (section == SectionDuoFold) {
-        [out addObject:@{@"title": @"Duo Fold", @"value": [d boolForKey:kSettingsDuoFoldEnabled] ? @"On" : @"Off"}];
-    } else if (section == SectionLocationSim) {''',
-        "Duo Fold settings summary",
-    )
-
-    text = patch_if_missing(
-        text,
-        'if (s == SectionDuoFold)',
-        '    if (s == SectionLocationSim) {',
-        '''    if (s == SectionDuoFold) {
-        return @"Uses iPhone motion as a virtual hinge to drive a fold-style SpringBoard effect. Enable it, apply pending tweaks, leave Cyanide in the background, then tilt the phone. Keep Alive is recommended for continuous motion updates.";
-    }
-    if (s == SectionLocationSim) {''',
-        "Duo Fold section description",
-    )
+    package_catalog.write_text(catalog_text, encoding="utf-8")
 
     settings.write_text(text, encoding="utf-8")
     print("[DUOFOLD] Applied successfully.")
     print("[DUOFOLD] Added Cyanide/tweaks/duofold.h and duofold.m")
-    print("[DUOFOLD] Patched SettingsViewController.m; project.pbxproj was not touched.")
+    print("[DUOFOLD] Patched runtime backend + Settings key export + installer PackageCatalog card; project.pbxproj was not touched.")
     print("[DUOFOLD] Backup: Cyanide/SettingsViewController.m.duofold.bak")
 
 if __name__ == "__main__":
