@@ -30,11 +30,11 @@ jobs:
       - name: Apply PerfHUD patch
         run: python3 apply_perfhud.py .
 
-      - name: Apply Gravity double-shake patch
-        run: python3 apply_gravity_shake.py .
-
       - name: Apply Duo Fold patch
         run: python3 apply_duofold.py .
+
+      - name: Apply Gravity double-shake patch
+        run: python3 apply_gravity_shake.py .
 
       - name: Disable thermal screen dimming
         run: python3 apply_no_thermal_dim.py .
