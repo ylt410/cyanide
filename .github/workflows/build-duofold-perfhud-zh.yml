@@ -1,0 +1,58 @@
+name: Build Cyanide Duo Fold 中文 PerfHUD
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Cyanide Duo Fold PerfHUD ZH
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Download public submodules
+        run: |
+          git config submodule.Cyanide/tweaks/private.update none
+          git submodule update --init --recursive
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Apply PerfHUD patch
+        run: python3 apply_perfhud.py .
+
+      - name: Apply Gravity double-shake patch
+        run: python3 apply_gravity_shake.py .
+
+      - name: Apply Duo Fold patch
+        run: python3 apply_duofold.py .
+
+      - name: Disable thermal screen dimming
+        run: python3 apply_no_thermal_dim.py .
+
+      - name: Apply Siri-style Notification Island patch
+        run: python3 apply_notification_island_siri.py .
+
+      - name: Apply Simplified Chinese patch
+        run: python3 apply_zh_hans.py .
+
+      - name: Build unsigned IPA
+        run: |
+          chmod +x ./scripts/build.sh
+          ./scripts/build.sh
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cyanide-DuoFold-PerfHUD-ZH
+          path: build/Cyanide.ipa
+          retention-days: 7
