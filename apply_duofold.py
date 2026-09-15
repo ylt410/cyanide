@@ -119,7 +119,7 @@ static void settings_start_duofold_motion(void)
             if (ok) {
                 __sync_lock_test_and_set(&g_duofold_update_warning_logged, 0);
             } else if (__sync_bool_compare_and_swap(&g_duofold_update_warning_logged, 0, 1)) {
-                log_user("[WARN] Duo Fold could not build/update its SpringBoard overlay.\n");
+                log_user("[WARN] Duo Fold could not build/update its SpringBoard overlay.\\n");
             }
         }
     });
