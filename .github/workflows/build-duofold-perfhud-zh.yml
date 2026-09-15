@@ -36,6 +36,67 @@ jobs:
       - name: Apply Gravity double-shake patch
         run: python3 apply_gravity_shake.py .
 
+      - name: Relax Powercuff patch guards
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("apply_no_thermal_dim.py")
+          s = p.read_text(encoding="utf-8")
+
+          s = re.sub(
+              r"def replace_once_or_already\(text: str, old: str, new: str, label: str\) -> str:\n.*?\n\n\ndef regex_once_or_already",
+              '''def replace_once_or_already(text: str, old: str, new: str, label: str) -> str:
+              if new in text:
+                  print(f"[POWERCUFF-V3] already patched: {label}")
+                  return text
+              if old not in text:
+                  print(f"[POWERCUFF-V3] skipped changed anchor: {label}")
+                  return text
+              print(f"[POWERCUFF-V3] patched: {label}")
+              return text.replace(old, new, 1)
+
+
+          def regex_once_or_already''',
+              s,
+              count=1,
+              flags=re.S,
+          )
+
+          s = re.sub(
+              r"def regex_once_or_already\(text: str, pattern: str, replacement: str, label: str, already: str\) -> str:\n.*?\n\n\ndef patch_powercuff_header",
+              '''def regex_once_or_already(text: str, pattern: str, replacement: str, label: str, already: str) -> str:
+              if already in text:
+                  print(f"[POWERCUFF-V3] already patched: {label}")
+                  return text
+              out, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+              if count == 0:
+                  print(f"[POWERCUFF-V3] skipped changed regex anchor: {label}")
+                  return text
+              print(f"[POWERCUFF-V3] patched: {label}")
+              return out
+
+
+          def patch_powercuff_header''',
+              s,
+              count=1,
+              flags=re.S,
+          )
+
+          p.write_text(s, encoding="utf-8")
+
+          settings = Path("Cyanide/SettingsViewController.m")
+          t = settings.read_text(encoding="utf-8")
+          t = re.sub(
+              r"(BOOL\s+needsSpringBoardWork\s*=\s*)(?!runPowercuff\s*\|\|\s*)",
+              r"\1runPowercuff || ",
+              t,
+              count=1,
+          )
+          settings.write_text(t, encoding="utf-8")
+          PY
+
       - name: Disable thermal screen dimming
         run: python3 apply_no_thermal_dim.py .
 
