@@ -206,9 +206,9 @@ static bool settings_stop_themer_registered''',
 
     text = patch_if_missing(
         text,
-        'runGravityLite || runDuoFold || runLayoutExtras',
-        'runGravityLite || runLayoutExtras',
-        'runGravityLite || runDuoFold || runLayoutExtras',
+        'BOOL needsSpringBoardWork = runDuoFold ||',
+        'BOOL needsSpringBoardWork = ',
+        'BOOL needsSpringBoardWork = runDuoFold || ',
         "Duo Fold SpringBoard work flag",
     )
 
@@ -254,44 +254,90 @@ static bool settings_stop_themer_registered''',
         "Duo Fold background live-loop requirement",
     )
 
-    text = patch_if_missing(
-        text,
-        '@"title": @"Duo Fold animation"',
-        '''        @{ @"kind": @"toggle",
-           @"key": kSettingsGravityLiteDockEnabled,
-           @"title": @"Include Dock" },''',
-        '''        @{ @"kind": @"toggle",
-           @"key": kSettingsGravityLiteDockEnabled,
-           @"title": @"Include Dock" },
-        @{ @"kind": @"toggle",
+    # Remove stale nested Duo Fold rows from older patch versions.
+    # Best-effort only: if those fragments are absent, keep going.
+    stale_nested_blocks = [
+        """        @{ @"kind": @"toggle",
            @"key": kSettingsDuoFoldEnabled,
            @"title": @"Duo Fold animation",
-           @"subtitle": @"Uses iPhone motion as a virtual hinge; Keep Alive is recommended." },''',
-        "Duo Fold settings row",
+           @"subtitle": @"Uses iPhone motion as a virtual hinge; Keep Alive is recommended." },
+""",
+        """        @{ @"kind": @"toggle",
+           @"key": kSettingsDuoFoldEnabled,
+           @"title": @"Duo Fold animation",
+           @"subtitle": @"Motion-driven fold effect. Keep Alive is recommended." },
+""",
+    ]
+    for stale in stale_nested_blocks:
+        text = text.replace(stale, "")
+
+    # Dedicated top-level Settings card and detail page. Duo Fold is a sibling of
+    # Gravity Lite, never a row inside Gravity Lite.
+    text = patch_if_missing(
+        text,
+        'SectionDuoFold,',
+        '    SectionGravityLite,\n    SectionAppSwitcherGrid,',
+        '    SectionGravityLite,\n    SectionDuoFold,\n    SectionAppSwitcherGrid,',
+        "Duo Fold settings section enum",
     )
 
     text = patch_if_missing(
         text,
-        '@"title": @"Duo Fold",',
-        '''        [out addObject:@{@"title": @"Spin resist.", @"value": [NSString stringWithFormat:@"%ld%%", (long)[d integerForKey:kSettingsGravityLiteAngularResistancePct]]}];
-    }''',
-        '''        [out addObject:@{@"title": @"Spin resist.", @"value": [NSString stringWithFormat:@"%ld%%", (long)[d integerForKey:kSettingsGravityLiteAngularResistancePct]]}];
-        [out addObject:@{@"title": @"Duo Fold",    @"value": [d boolForKey:kSettingsDuoFoldEnabled] ? @"On" : @"Off"}];
-    }''',
+        '- (NSArray<NSDictionary *> *)duoFoldRows',
+        '- (NSArray<NSDictionary *> *)gravityLiteRows\n{',
+        '''- (NSArray<NSDictionary *> *)duoFoldRows
+{
+    return @[
+        @{ @"kind": @"toggle",
+           @"key": kSettingsDuoFoldEnabled,
+           @"title": @"Enable Duo Fold",
+           @"subtitle": @"Motion-driven fold effect. Keep Alive is recommended." },
+    ];
+}
+
+- (NSArray<NSDictionary *> *)gravityLiteRows
+{''',
+        "Duo Fold standalone rows",
+    )
+
+    text = patch_if_missing(
+        text,
+        'case SectionDuoFold: return self.duoFoldRows;',
+        '        case SectionGravityLite: return self.gravityLiteRows;\n',
+        '        case SectionGravityLite: return self.gravityLiteRows;\n'
+        '        case SectionDuoFold: return self.duoFoldRows;\n',
+        "Duo Fold rowsForSection case",
+    )
+
+    text = patch_if_missing(
+        text,
+        '@"section": @(SectionDuoFold)',
+        '        @{ @"title": @"Gravity Lite",       @"icon": @"arrow.down.circle.fill",              @"color": [UIColor systemGreenColor],  @"section": @(SectionGravityLite) },\n',
+        '        @{ @"title": @"Gravity Lite",       @"icon": @"arrow.down.circle.fill",              @"color": [UIColor systemGreenColor],  @"section": @(SectionGravityLite) },\n'
+        '        @{ @"title": @"Duo Fold",          @"icon": @"iphone",                              @"color": [UIColor systemIndigoColor], @"section": @(SectionDuoFold) },\n',
+        "Duo Fold top-level settings card",
+    )
+
+    text = patch_if_missing(
+        text,
+        'section == SectionDuoFold',
+        '    } else if (section == SectionLocationSim) {',
+        '''    } else if (section == SectionDuoFold) {
+        [out addObject:@{@"title": @"Duo Fold", @"value": [d boolForKey:kSettingsDuoFoldEnabled] ? @"On" : @"Off"}];
+    } else if (section == SectionLocationSim) {''',
         "Duo Fold settings summary",
     )
 
-    required = (
-        '#import "tweaks/duofold.h"',
-        'kSettingsDuoFoldEnabled',
-        'settings_start_duofold_motion',
-        'BOOL runDuoFold =',
-        'Starting Duo Fold motion effect',
-        '@"title": @"Duo Fold animation"',
+    text = patch_if_missing(
+        text,
+        'if (s == SectionDuoFold)',
+        '    if (s == SectionLocationSim) {',
+        '''    if (s == SectionDuoFold) {
+        return @"Uses iPhone motion as a virtual hinge to drive a fold-style SpringBoard effect. Enable it, apply pending tweaks, leave Cyanide in the background, then tilt the phone. Keep Alive is recommended for continuous motion updates.";
+    }
+    if (s == SectionLocationSim) {''',
+        "Duo Fold section description",
     )
-    missing = [marker for marker in required if marker not in text]
-    if missing:
-        fail("patch incomplete: " + ", ".join(missing))
 
     settings.write_text(text, encoding="utf-8")
     print("[DUOFOLD] Applied successfully.")
